@@ -84,10 +84,10 @@ export default function App() {
           
           // 👉 核心修改 1：请在这里填入您真实的 Google API Key
           // 因为是您自用的工作台，把 Key 放在这里是最稳妥防 Vercel 拦截的方案
-          const apiKey = "YOUR_API_KEY"; 
+          const apiKey = "AIzaSyDOmIqYfZ1W5vH8OVmu3IGADC1Zsz5LD5s"; 
           
           if (!apiKey || apiKey === "YOUR_API_KEY") {
-             throw new Error("请在 App.jsx 的 processVideo 函数中填入您的 Gemini API Key！");
+             throw new Error("请在代码中找到 apiKey 变量，填入您真实的 Gemini API Key！");
           }
 
           const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`; 
@@ -165,7 +165,7 @@ export default function App() {
         } catch (error) {
           console.error("处理失败详细信息:", error);
           // 使用更详细的错误提示反馈
-          alert(`处理失败！\n\n【错误详情】:\n${error.message}\n\n👉【排查建议】:\n1. 确保已在 Vercel 设置 GEMINI_API_KEY，并且设置后点击了 "Redeploy" 重新部署。\n2. 检查音频文件是否过大 (Vercel 免费版限制约 4.5MB)。\n3. 前往 Vercel 后台 -> "Logs" 标签页查看后端完整报错。`);
+          alert(`处理失败！\n\n【错误详情】:\n${error.message}`);
           setCurrentView('upload');
         }
       };
@@ -234,7 +234,8 @@ export default function App() {
       <header className="bg-white shadow-sm px-6 py-5 flex justify-between items-center">
         <div>
           <h1 className="text-xl font-bold text-gray-800">控制台</h1>
-          <p className="text-xs text-gray-500 mt-1">管理员专属合成工具</p>
+          {/* 添加版本标识帮助排查缓存 */}
+          <p className="text-xs text-gray-500 mt-1">管理员专属合成工具 <span className="text-indigo-500 font-bold ml-1">(直连版 v2)</span></p>
         </div>
         <button className="p-2 rounded-full hover:bg-gray-100">
           <Settings size={20} className="text-gray-600" />
