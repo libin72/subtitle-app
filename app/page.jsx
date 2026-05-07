@@ -93,7 +93,8 @@ export default function App() {
              throw new Error("请先在上传页面上方填入有效的 Gemini API Key！");
           }
 
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`; 
+          // 已将模型更改为公共可用的稳定版本 gemini-1.5-flash
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`; 
           
           const prompt = `I am providing an audio file and its English transcript. 
           Transcript: ${formData.rawText}
