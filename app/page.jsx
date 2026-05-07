@@ -18,7 +18,7 @@ const CrossfadeImage = ({ src }) => {
   }, [src]);
 
   return (
-    <div className="relative w-full aspect-video flex-shrink-0 bg-gray-900 overflow-hidden shadow-xl border-y border-white/10">
+    <div className="relative w-full h-full flex-shrink-0 bg-gray-900 overflow-hidden shadow-xl">
       {images.map((imgSrc, idx) => (
         <img
           key={`${imgSrc}-${idx}`}
@@ -57,8 +57,8 @@ export default function App() {
     audioName: '',
     audioUrl: '',
     audioDuration: 0,
-    rawText: '',
-    logoUrl: 'https://m.media-amazon.com/images/I/410dAIOIeIL._SL10_UR1600,800_CR200,50,1200,630_CLa|1200,630|410dAIOIeIL.jpg|0,0,1200,630+82,82,465,465_PJAdblSocialShare-Gradientoverlay-largeasin-0to70,TopLeft,0,0_PJAdblSocialShare-AudibleLogo-Large,TopLeft,600,270_OU01_ZBLISTENING ON,617,216,52,500,AudibleSansMd,30,255,255,255_PJAdblSocialShare-PodcastIcon-Small,TopLeft,1094,50.jpg'
+    rawText: ''
+    // 移除了默认的 logoUrl 配置，强制要求全手动上传
   });
 
   // 核心数据状态
@@ -76,19 +76,6 @@ export default function App() {
   const getFormattedDate = () => {
     const date = new Date();
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
-  };
-
-  // 将 URL 转换为 Blob URL 以缓存图片防闪烁
-  const fetchToBlobUrl = async (url) => {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('Fetch failed');
-      const blob = await res.blob();
-      return URL.createObjectURL(blob);
-    } catch(e) {
-      console.warn("图片本地化缓存失败，使用原直链:", url);
-      return url; 
-    }
   };
 
   // ================= 处理合成逻辑 =================
@@ -125,7 +112,7 @@ export default function App() {
       const whisperResult = await whisperRes.json();
       if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
       
-      // === 稳健的断句算法 (按段落等比切割，彻底修复音画不同步和U.S.断句) ===
+      // === 稳健的断句算法 (杜绝末尾落单单词 & U.S. 断句修复) ===
       setProcessMsg("正在分析断句与优化词轴...");
       let finalSourceSegments = [];
 
@@ -138,15 +125,34 @@ export default function App() {
         } else {
             let chunks = [];
             let currentChunk = [];
+            
             words.forEach((w, idx) => {
                 currentChunk.push(w);
                 const wordCount = currentChunk.length;
+                const remainingWords = words.length - 1 - idx; // 剩下还有几个词
+                const isLastWord = idx === words.length - 1;
+
                 // 正则排除英文缩写造成的误判
                 const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
                 const hasStrong = !isAbbr && /[.?!。？！]['"]*$/.test(w);
                 const hasWeak = /[,;，；]['"]*$/.test(w);
                 
-                if (hasStrong || (hasWeak && wordCount >= 8) || wordCount >= 15 || idx === words.length - 1) {
+                let shouldSplit = false;
+                
+                if (isLastWord) {
+                    shouldSplit = true;
+                } else if (wordCount >= 15) {
+                    // 强行触及 15 词上限，强制断开
+                    shouldSplit = true;
+                } else if (hasStrong && remainingWords > 3) {
+                    // 遇到强标点，且后面还有足够多的词，才断句 (防止最后剩1-3个词)
+                    shouldSplit = true;
+                } else if (hasWeak && wordCount >= 8 && remainingWords > 3) {
+                    // 遇到弱标点，当前已满8词，且后面有足够多的词
+                    shouldSplit = true;
+                }
+
+                if (shouldSplit) {
                     chunks.push(currentChunk.join(" "));
                     currentChunk = [];
                 }
@@ -164,13 +170,13 @@ export default function App() {
         }
       });
 
-      // --- 第 2 步：分批无损翻译与日期提取 ---
+      // --- 第 2 步：分批无损翻译与日期提取 (严格缩小批次防漏翻) ---
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
       let translatedData = [];
       let extractedDateStr = "";
       
-      const chunkSize = 20; 
+      const chunkSize = 10; // 缩小每次请求的数量至10句，确保AI稳定翻译绝不遗漏
       const totalChunks = Math.ceil(inputMapping.length / chunkSize);
 
       for (let i = 0; i < inputMapping.length; i += chunkSize) {
@@ -182,15 +188,15 @@ export default function App() {
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
         2. Translate English to natural Chinese.
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
-        4. Return a JSON OBJECT with exactly ${chunk.length} items in 'subtitles'. Do NOT skip any.
+        4. CRITICAL: You MUST translate EVERY SINGLE segment provided. Return EXACTLY ${chunk.length} items in the "subtitles" array, mapping exactly to the input "id".
 
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 800) : "None."}
         INPUT: ${JSON.stringify(chunk)}
 
-        JSON FORMAT:
+        OUTPUT JSON FORMAT:
         {
           "extractedDate": "...",
-          "subtitles": [ { "id": 0, "en": "...", "zh": "..." } ]
+          "subtitles": [ { "id": <exact_id>, "en": "...", "zh": "..." } ]
         }`;
 
         const llmRes = await fetch(chatUrl, {
@@ -218,15 +224,14 @@ export default function App() {
 
       setNewsDate(extractedDateStr || getFormattedDate());
 
-      // --- 第 3 步：初始化单个默认块 ---
+      // --- 第 3 步：初始化单个默认块 (无任何默认图片) ---
       setProcessMsg("3. 正在组装项目...");
-      const defaultLogoBlob = await fetchToBlobUrl(formData.logoUrl);
       const initialBlockId = 'block-0';
       
       setBlocks([{
         id: initialBlockId,
         title: '新闻开场 (Intro)',
-        image: defaultLogoBlob
+        image: "" // 初始没有默认图片
       }]);
 
       let finalSubtitles = finalSourceSegments.map((seg, i) => {
@@ -236,7 +241,7 @@ export default function App() {
           start: seg.start, 
           end: seg.end, 
           en: matchObj.en || seg.text, 
-          zh: matchObj.zh || "（翻译丢失，请重试）",
+          zh: matchObj.zh || "（翻译失败，可手动补全）",
           blockId: initialBlockId
         };
       });
@@ -260,14 +265,14 @@ export default function App() {
   const handleSplitAfter = (subId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
     
-    // 1. 插入新 Block
+    // 1. 插入新 Block (默认无图片)
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
         const newBlocks = [...prev];
         newBlocks.splice(idx + 1, 0, { 
             id: newBlockId, 
             title: `新闻片段 ${newBlocks.length + 1}`, 
-            image: formData.logoUrl // 默认用全局logo
+            image: "" 
         });
         return newBlocks;
     });
@@ -368,7 +373,7 @@ export default function App() {
     }
 
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
-    let targetImage = formData.logoUrl;
+    let targetImage = ""; // 默认无图片
     if (activeSubtitle) {
         const b = blocks.find(blk => blk.id === activeSubtitle.blockId);
         if (b) targetImage = b.image;
@@ -384,8 +389,15 @@ export default function App() {
 
         {/* A/B 分区 */}
         <div className="flex-1 flex flex-col w-full z-10 overflow-hidden">
-          <div className="w-full flex-shrink-0">
-             <CrossfadeImage src={targetImage} />
+          <div className="w-full flex-shrink-0 bg-gray-900 aspect-video flex items-center justify-center border-y border-white/10">
+             {targetImage ? (
+                <CrossfadeImage src={targetImage} />
+             ) : (
+                <div className="text-gray-500 flex flex-col items-center opacity-60">
+                   <ImageIcon size={32} className="mb-2" />
+                   <span className="text-xs">等待人工上传配图</span>
+                </div>
+             )}
           </div>
           <div className="flex-1 w-full px-5 pt-6 pb-12 overflow-y-auto flex flex-col justify-start">
             {activeSubtitle ? (
@@ -419,7 +431,7 @@ export default function App() {
           <div className="p-8 max-w-3xl mx-auto w-full space-y-8 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">支持大文件解析，手动切分片段并独立配图。</p>
+              <p className="text-sm text-gray-500 mt-2">支持大文件解析，全手动切分片段并独立配图。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
@@ -495,7 +507,7 @@ export default function App() {
         <div className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
           {blocks.map((block, bIdx) => {
             const blockSubs = subtitles.filter(s => s.blockId === block.id);
-            if (blockSubs.length === 0) return null; // Hide empty blocks safely
+            if (blockSubs.length === 0) return null; 
             
             return (
               <div key={block.id} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col 2xl:flex-row">
@@ -514,14 +526,21 @@ export default function App() {
                          </button>
                        )}
                     </div>
-                    <div className="w-full aspect-video bg-black rounded-lg overflow-hidden relative shadow-inner border border-gray-200 mb-4 group">
-                       <img src={block.image} className="w-full h-full object-cover" alt="Block Cover" />
+                    <div className="w-full aspect-video bg-black rounded-lg overflow-hidden relative shadow-inner border border-gray-200 mb-4 flex items-center justify-center group">
+                       {block.image ? (
+                          <img src={block.image} className="w-full h-full object-cover" alt="Block Cover" />
+                       ) : (
+                          <div className="text-gray-500 flex flex-col items-center">
+                            <ImageIcon size={28} className="mb-1 opacity-50" />
+                            <span className="text-xs">该片段暂无图片</span>
+                          </div>
+                       )}
                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                          <span className="text-white font-medium text-sm drop-shadow-md">点击下方按钮更换</span>
+                          <span className="text-white font-medium text-sm drop-shadow-md">点击下方上传</span>
                        </div>
                     </div>
                     <label className="w-full flex items-center justify-center bg-white border border-gray-300 text-gray-700 hover:text-blue-600 hover:border-blue-400 py-2.5 rounded-xl cursor-pointer text-sm font-semibold transition-colors shadow-sm">
-                       <ImagePlus size={16} className="mr-2" /> 上传专属片段配图
+                       <ImagePlus size={16} className="mr-2" /> 上传片段配图
                        <input type="file" accept="image/*" className="hidden" onChange={(e)=>handleReplaceBlockImage(block.id, e.target.files[0])} />
                     </label>
                  </div>
@@ -557,7 +576,7 @@ export default function App() {
                               </div>
                             </div>
 
-                            {/* 手动切分按钮 (悬浮于两句之间) */}
+                            {/* 手动切分按钮 */}
                             {!isLastOverall && (
                               <div className="flex justify-center my-1 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
@@ -578,7 +597,7 @@ export default function App() {
     );
   };
 
-  // 全局渲染主骨架：左右双栏 MacBook 级布局
+  // 全局渲染主骨架
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
       <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
