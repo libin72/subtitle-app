@@ -53,8 +53,22 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [processStep, setProcessStep] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  // 新增：提取的播报日期
+  const [newsDate, setNewsDate] = useState('');
 
   const audioRef = useRef(null);
+
+  // 获取格式化的今天日期（作为降级使用的后备日期）
+  const getFormattedDate = () => {
+    const date = new Date();
+    return date.toLocaleDateString('zh-CN', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric', 
+      weekday: 'long' 
+    });
+  };
 
   // ================= 核心处理逻辑 (Whisper + LLM) =================
   useEffect(() => {
@@ -90,7 +104,7 @@ export default function App() {
           const whisperResult = await whisperRes.json();
           if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
           
-          // === 精确同步与智能拆分逻辑 ===
+          // === 精确同步与智能拆分逻辑 (严格15词限制) ===
           let finalSourceSegments = [];
 
           if (whisperResult.words && whisperResult.words.length > 0) {
@@ -107,7 +121,11 @@ export default function App() {
                   const hasWeakPunctuation = /[,;，；]['"]*$/.test(w.word.trim());
                   const isLastWord = idx === whisperResult.words.length - 1;
                   
-                  if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 15) || wordCount >= 25 || isLastWord) {
+                  // 规则：
+                  // 1. 遇到强标点立刻断句。
+                  // 2. 遇到弱标点且字数超过8个词（避免过度拆分常用短语），进行断句。
+                  // 3. 一旦达到15个单词，无论如何强行断句，确保不超过三行。
+                  if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 8) || wordCount >= 15 || isLastWord) {
                       finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
                       currentSeg = null;
                   }
@@ -123,7 +141,7 @@ export default function App() {
                       const wordCount = currentChunk.length;
                       const hasStrong = /[.?!。？！]['"]*$/.test(w);
                       const hasWeak = /[,;，；]['"]*$/.test(w);
-                      if (hasStrong || (hasWeak && wordCount >= 15) || wordCount >= 25 || idx === words.length - 1) {
+                      if (hasStrong || (hasWeak && wordCount >= 8) || wordCount >= 15 || idx === words.length - 1) {
                           chunks.push(currentChunk.join(" "));
                           currentChunk = [];
                       }
@@ -140,7 +158,7 @@ export default function App() {
               });
           }
 
-          // --- 第 2 步：防漏翻机制 ---
+          // --- 第 2 步：防漏翻机制 + 提取播报日期 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
@@ -150,8 +168,9 @@ export default function App() {
           const translationPrompt = `You are a professional subtitle translator.
           1. Correct any OCR/speech-recognition typos in the provided English text, referring to the RAW REFERENCE if given.
           2. Translate the corrected English into natural, concise Chinese.
-          3. You MUST return a VALID JSON OBJECT containing an array named "subtitles".
-          4. You MUST NOT skip any segment. Map each translation exactly to its input "id".
+          3. EXTRACTION: Look for any specific broadcast date mentioned in the text (e.g. "Today is Wednesday, October 11th"). Extract it and translate it into a natural Chinese date (e.g. "10月11日 星期三"). If no date is found, return an empty string "".
+          4. You MUST return a VALID JSON OBJECT with exactly two keys: "extractedDate" and "subtitles".
+          5. You MUST NOT skip any segment. Map each translation exactly to its input "id".
 
           RAW REFERENCE TEXT:
           ${formData.rawText ? formData.rawText : "None. Fix obvious grammar typos."}
@@ -161,6 +180,7 @@ export default function App() {
 
           REQUIRED JSON OUTPUT FORMAT:
           {
+            "extractedDate": "...",
             "subtitles": [
               { "id": 0, "en": "corrected english...", "zh": "中文翻译..." },
               { "id": 1, "en": "...", "zh": "..." }
@@ -191,9 +211,11 @@ export default function App() {
           const responseText = llmResult.choices[0].message.content;
           
           let translatedData = [];
+          let extractedDateStr = "";
           try {
              const parsed = JSON.parse(responseText);
              translatedData = parsed.subtitles || [];
+             extractedDateStr = parsed.extractedDate || "";
           } catch (e) {
              console.error("JSON 解析失败:", responseText);
              throw new Error("大模型未返回合规的 JSON 数据，请重试。");
@@ -201,6 +223,10 @@ export default function App() {
 
           // --- 第 4 步：融合组装 ---
           setProcessStep(4);
+          
+          // 更新提取到的新闻日期，若为空则使用当天的后备日期
+          setNewsDate(extractedDateStr || getFormattedDate());
+
           const finalSubtitles = finalSourceSegments.map((seg, i) => {
             const matchObj = translatedData.find(t => t.id === i) || {};
             return { 
@@ -208,7 +234,7 @@ export default function App() {
               start: seg.start, 
               end: seg.end, 
               en: matchObj.en || seg.text, 
-              zh: matchObj.zh || "（翻译丢失，请检查）" 
+              zh: matchObj.zh || "（翻译丢失，请重试）" 
             };
           });
 
@@ -289,17 +315,6 @@ export default function App() {
     const s = Math.floor(seconds % 60);
     const ms = Math.floor((seconds % 1) * 10);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
-  };
-
-  // 获取格式化的今天日期（用于成品预览界面）
-  const getFormattedDate = () => {
-    const date = new Date();
-    return date.toLocaleDateString('zh-CN', { 
-      year: 'numeric', 
-      month: 'long', 
-      day: 'numeric', 
-      weekday: 'long' 
-    });
   };
 
   // --- 视图渲染 ---
@@ -449,10 +464,10 @@ export default function App() {
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
             <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-            参考原稿 (选填，AI 将以此为准纠错)
+            参考原稿 (选填，AI 将以此为准纠错并提取日期)
           </label>
           <textarea 
-            placeholder="如果包含专有名词，建议粘贴英文原稿。AI 会将音频时间轴自动吸附并对齐至原稿。"
+            placeholder="如果包含专有名词或特定日期，建议粘贴英文原稿。AI 会将其自动吸附对齐并翻译。"
             className="w-full h-20 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500"
             value={formData.rawText}
             onChange={(e) => setFormData({...formData, rawText: e.target.value})}
@@ -602,7 +617,7 @@ export default function App() {
             })}
           </div>
 
-          {/* 新增：固定在后台编辑器底部的预览按钮 */}
+          {/* 固定在后台编辑器底部的预览按钮 */}
           <div className="bg-white border-t border-gray-200 p-4 shrink-0 z-20 shadow-[0_-4px_10px_-1px_rgba(0,0,0,0.08)]">
             <button 
               onClick={() => setCurrentView('preview')}
@@ -618,14 +633,14 @@ export default function App() {
     );
   };
 
-  // ================= 新增：全屏成品预览视图 =================
+  // ================= 新增：全屏成品预览视图 (顶部排版 + 自动提取日期) =================
   const renderPreview = () => {
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
     
     return (
       <div 
         className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer"
-        onClick={() => setIsPlaying(!isPlaying)} // 点击屏幕任意位置播放/暂停
+        onClick={() => setIsPlaying(!isPlaying)} 
       >
         {/* 背景图片 */}
         <img 
@@ -645,31 +660,31 @@ export default function App() {
           <ChevronLeft size={24} />
         </button>
 
-        {/* 顶部标题区 */}
-        <div className="absolute top-20 left-0 right-0 z-10 flex flex-col items-center justify-center text-white px-6 text-center drop-shadow-xl">
-          <h1 className="text-5xl sm:text-6xl font-extrabold tracking-tight mb-3 font-sans">
+        {/* 顶部标题区 - 保持在最上方 */}
+        <div className="absolute top-12 left-0 right-0 z-10 flex flex-col items-center justify-center text-white px-6 text-center drop-shadow-xl">
+          <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight mb-2 font-sans">
             KidNuz
           </h1>
-          <p className="text-lg sm:text-xl font-medium opacity-95">
-            {getFormattedDate()}
+          <p className="text-base sm:text-lg font-medium opacity-95 text-yellow-400">
+            {newsDate || getFormattedDate()}
           </p>
         </div>
 
-        {/* 字幕显示区 */}
-        <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-8 text-center mt-32">
+        {/* 字幕显示区 - 改为紧凑的顶部对齐排版，缩小字号 */}
+        <div className="relative z-10 flex-1 flex flex-col items-center justify-start px-6 text-center mt-36 sm:mt-40">
           {activeSubtitle ? (
-            <div className="space-y-6 w-full max-w-2xl bg-black/20 backdrop-blur-sm p-6 rounded-2xl">
-              <p className="text-white font-bold text-3xl sm:text-4xl leading-snug drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+            <div className="space-y-4 w-full max-w-2xl bg-black/40 backdrop-blur-md p-5 rounded-2xl border border-white/10">
+              <p className="text-white font-semibold text-xl sm:text-2xl leading-relaxed drop-shadow-md">
                 {activeSubtitle.en}
               </p>
-              <p className="text-yellow-400 font-bold text-2xl sm:text-3xl leading-snug drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+              <p className="text-yellow-400 font-bold text-lg sm:text-xl leading-relaxed drop-shadow-md">
                 {activeSubtitle.zh}
               </p>
             </div>
           ) : null}
         </div>
 
-        {/* 播放暂停指示器提示 (仅在暂停时隐约显示) */}
+        {/* 播放暂停指示器 */}
         {!isPlaying && (
           <div className="absolute inset-0 z-0 flex items-center justify-center pointer-events-none">
             <div className="bg-black/40 rounded-full p-6 backdrop-blur-sm">
@@ -678,7 +693,7 @@ export default function App() {
           </div>
         )}
 
-        {/* 底部极简进度条 */}
+        {/* 底部进度条 */}
         <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800/50 z-20">
           <div 
             className="h-full bg-yellow-400/80 transition-all duration-100 ease-linear"
@@ -691,7 +706,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-200 flex items-center justify-center p-0 sm:p-4">
-      {/* 提取到最外层的全局隐藏音频组件 */}
       <audio 
         ref={audioRef} 
         src={formData.audioUrl} 
