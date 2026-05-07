@@ -8,7 +8,7 @@ import {
   Eye 
 } from 'lucide-react';
 
-// ================= 新增：图片丝滑渐变组件 (用于 Zone A) =================
+// ================= 新增：图片丝滑渐变组件 (用于 Zone A，已更新为 16:9 满宽无留白) =================
 const CrossfadeImage = ({ src }) => {
   const [images, setImages] = useState([src]);
 
@@ -20,7 +20,7 @@ const CrossfadeImage = ({ src }) => {
   }, [src]);
 
   return (
-    <div className="relative w-full h-full max-w-[280px] sm:max-w-[320px] aspect-square mx-auto rounded-2xl overflow-hidden shadow-2xl bg-gray-900 border border-white/10">
+    <div className="relative w-full aspect-video flex-shrink-0 bg-gray-900 overflow-hidden shadow-2xl">
       {images.map((imgSrc, idx) => (
         <img
           key={imgSrc}
@@ -70,9 +70,9 @@ export default function App() {
     audioUrl: '',
     audioDuration: 0,
     rawText: '',
-    // 将背景图改为 Logo 图，用于新闻过渡和开场
-    logoName: '',
-    logoUrl: 'https://images.unsplash.com/photo-1588681664899-f142ff2dc9b1?q=80&w=400&auto=format&fit=crop'
+    // 将背景图改为用户指定的 Audible/KidNuz 封面图，用于新闻过渡和开场
+    logoName: 'Default KidNuz Cover',
+    logoUrl: 'https://m.media-amazon.com/images/I/410dAIOIeIL._SL10_UR1600,800_CR200,50,1200,630_CLa|1200,630|410dAIOIeIL.jpg|0,0,1200,630+82,82,465,465_PJAdblSocialShare-Gradientoverlay-largeasin-0to70,TopLeft,0,0_PJAdblSocialShare-AudibleLogo-Large,TopLeft,600,270_OU01_ZBLISTENING ON,617,216,52,500,AudibleSansMd,30,255,255,255_PJAdblSocialShare-PodcastIcon-Small,TopLeft,1094,50.jpg'
   });
 
   const [subtitles, setSubtitles] = useState([]);
@@ -182,7 +182,7 @@ export default function App() {
               });
           }
 
-          // --- 第 2 步：防漏翻 + 提取日期 + 自动分析画面关键词 ---
+          // --- 第 2 步：防漏翻 + 提取日期 + 自动分析画面关键词及统一故事线 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
@@ -193,7 +193,11 @@ export default function App() {
           1. Correct any OCR/speech-recognition typos in the provided English text, referring to the RAW REFERENCE if given.
           2. Translate the corrected English into natural, concise Chinese.
           3. EXTRACTION: Extract the broadcast date if mentioned (e.g. "Today is Wednesday, October 11th") and translate it to Chinese format (e.g. "10月11日 星期三"). Else, return "".
-          4. VISUAL CONTEXT: Categorize each segment's 'type' as "intro" (welcome/date), "transition" (music/pause between stories), or "news". For "news", provide a 1-3 word English 'keyword' representing the specific topic (e.g., "space rocket", "election", "dog"). For others, leave keyword empty.
+          4. VISUAL CONTEXT & STORY GROUPING: 
+             - Categorize each segment's 'type' into exactly one of these four: "intro" (welcome/date), "transition" (music/pause between stories), "news" (the actual news content), or "quiz" (the quiz section at the end).
+             - A typical episode has 4-6 distinct news stories. For all segments belonging to the SAME news story, you MUST provide the EXACT SAME 1-3 word English 'keyword' representing that specific story (e.g., "space rocket"). 
+             - Do not change the keyword within the same news story! This ensures the background image remains stable for the duration of that story.
+             - For "intro", "transition", and "quiz", leave the keyword empty ("").
           5. You MUST return a VALID JSON OBJECT. Do NOT skip any segment. Map exactly to "id".
 
           RAW REFERENCE:
@@ -207,7 +211,9 @@ export default function App() {
             "extractedDate": "...",
             "subtitles": [
               { "id": 0, "en": "corrected english...", "zh": "中文翻译...", "type": "intro", "keyword": "" },
-              { "id": 1, "en": "...", "zh": "...", "type": "news", "keyword": "rocket launch" }
+              { "id": 1, "en": "...", "zh": "...", "type": "news", "keyword": "rocket launch" },
+              { "id": 2, "en": "...", "zh": "...", "type": "news", "keyword": "rocket launch" },
+              { "id": 3, "en": "...", "zh": "...", "type": "quiz", "keyword": "" }
             ]
           }`;
 
@@ -258,7 +264,7 @@ export default function App() {
               en: matchObj.en || seg.text, 
               zh: matchObj.zh || "（翻译丢失，请重试）",
               type: matchObj.type || 'news',
-              keyword: matchObj.keyword || 'news event'
+              keyword: matchObj.keyword || ''
             };
           });
 
@@ -497,7 +503,7 @@ export default function App() {
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
             <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">3</span>
-            节目 Logo/过渡图片 (Zone A)
+            节目默认过渡图片 (Zone A)
           </label>
           <div className="flex space-x-4 h-24">
             <div className="w-1/3 rounded-lg overflow-hidden relative border border-gray-200 shadow-sm bg-black flex items-center justify-center">
@@ -641,6 +647,10 @@ export default function App() {
                         onChange={(e) => { const n=[...subtitles]; n[index].end=parseFloat(e.target.value)||0; setSubtitles(n); }}
                         className="w-12 bg-transparent border-b border-gray-300 text-center outline-none focus:border-blue-500" />
                     </div>
+                    {/* 显示当前切片的智能分类和关键词标签 */}
+                    <div className="text-[10px] text-gray-400 mr-2 bg-gray-100 px-2 py-0.5 rounded">
+                      {sub.type} {sub.keyword ? `| ${sub.keyword}` : ''}
+                    </div>
                   </div>
                   <div className="p-3 space-y-2">
                     <div className="relative">
@@ -679,9 +689,17 @@ export default function App() {
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
     
     // 根据 LLM 的分类，智能决定 Zone A 应该显示什么图片
-    const targetImage = activeSubtitle && activeSubtitle.type === 'news' && activeSubtitle.keyword
-      ? `https://image.pollinations.ai/prompt/${encodeURIComponent(activeSubtitle.keyword + ' news photography')}?width=400&height=400&nologo=true`
-      : formData.logoUrl;
+    let targetImage = formData.logoUrl; // 默认为开场/过渡时的图片
+    
+    if (activeSubtitle) {
+      if (activeSubtitle.type === 'quiz') {
+        // 如果是 Quiz 环节，指定使用专用的问答图片
+        targetImage = 'https://eflideas.com/wp-content/uploads/2021/02/quiz-5858940_1920.jpg';
+      } else if (activeSubtitle.type === 'news' && activeSubtitle.keyword) {
+        // 如果是新闻环节，根据当前新闻的故事关键字自动获取 16:9 配图
+        targetImage = `https://image.pollinations.ai/prompt/${encodeURIComponent(activeSubtitle.keyword + ' news photography')}?width=1280&height=720&nologo=true`;
+      }
+    }
     
     return (
       <div 
@@ -710,21 +728,21 @@ export default function App() {
         </div>
 
         {/* 屏幕空间一分为二 (A/B 区) */}
-        <div className="flex-1 flex flex-col w-full px-6 pb-8 z-10">
+        <div className="flex-1 flex flex-col w-full z-10 overflow-hidden">
           
-          {/* Zone A: 智能图片展示区 (上半部) */}
-          <div className="flex-1 flex items-center justify-center min-h-[30vh]">
+          {/* Zone A: 智能图片展示区 (上半部) - 完全横向铺满，16:9比例 */}
+          <div className="w-full flex-shrink-0">
              <CrossfadeImage src={targetImage} />
           </div>
 
-          {/* Zone B: 顶部对齐的字幕区 (下半部) */}
-          <div className="flex-1 flex flex-col items-center justify-start pt-6 overflow-hidden">
+          {/* Zone B: 字幕区 (下半部) - 靠左对齐 */}
+          <div className="flex-1 w-full px-6 pt-6 pb-12 overflow-y-auto flex flex-col justify-start">
             {activeSubtitle ? (
-              <div className="w-full max-w-2xl bg-white/5 backdrop-blur-md p-5 rounded-2xl border border-white/10">
-                <p className="text-white font-semibold text-xl leading-relaxed drop-shadow-md mb-3 text-center">
+              <div className="w-full bg-white/5 backdrop-blur-md p-5 rounded-2xl border border-white/10">
+                <p className="text-white font-semibold text-xl leading-relaxed drop-shadow-md mb-3 text-left">
                   {activeSubtitle.en}
                 </p>
-                <p className="text-yellow-400 font-bold text-lg leading-relaxed drop-shadow-md text-center">
+                <p className="text-yellow-400 font-bold text-lg leading-relaxed drop-shadow-md text-left">
                   {activeSubtitle.zh}
                 </p>
               </div>
