@@ -4,7 +4,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, FileText, Image as ImageIcon, 
   Play, Pause, Plus, ChevronLeft, Settings, 
-  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, Link as LinkIcon, Mic, MessageSquare
+  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, Link as LinkIcon, Mic, MessageSquare,
+  Eye // 新增的预览图标
 } from 'lucide-react';
 
 // 模拟初始测试数据
@@ -73,7 +74,7 @@ export default function App() {
           audioData.append('model', audioModel.trim());
           audioData.append('response_format', 'verbose_json'); 
           audioData.append('timestamp_granularities[]', 'segment'); 
-          audioData.append('timestamp_granularities[]', 'word'); // 强制请求词级时间戳，解决不同步核心
+          audioData.append('timestamp_granularities[]', 'word'); 
           
           const whisperRes = await fetch(whisperUrl, {
             method: 'POST',
@@ -89,32 +90,29 @@ export default function App() {
           const whisperResult = await whisperRes.json();
           if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
           
-          // === 新增：精确同步与智能拆分逻辑 ===
+          // === 精确同步与智能拆分逻辑 ===
           let finalSourceSegments = [];
 
           if (whisperResult.words && whisperResult.words.length > 0) {
               let currentSeg = null;
               whisperResult.words.forEach((w, idx) => {
-                  // 过滤无时间的幻觉单词
                   if (typeof w.start !== 'number' || typeof w.end !== 'number') return;
                   
                   if (!currentSeg) currentSeg = { start: w.start, end: w.end, text: "" };
                   currentSeg.text += (currentSeg.text ? " " : "") + w.word.trim();
-                  currentSeg.end = w.end; // 实时更新结束时间，确保毫秒级同步
+                  currentSeg.end = w.end; 
                   
                   const wordCount = currentSeg.text.split(/\s+/).length;
                   const hasStrongPunctuation = /[.?!。？！]['"]*$/.test(w.word.trim());
                   const hasWeakPunctuation = /[,;，；]['"]*$/.test(w.word.trim());
                   const isLastWord = idx === whisperResult.words.length - 1;
                   
-                  // 1. 强标点必断； 2. 弱标点超15词断； 3. 防溢出保底(无标点超25词)强制断； 4. 最后一句
                   if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 15) || wordCount >= 25 || isLastWord) {
                       finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
                       currentSeg = null;
                   }
               });
           } else {
-              // 降级兼容：接口不支持 word 时退回 segment 长度估算
               whisperResult.segments.forEach(seg => {
                   const words = seg.text.trim().split(/\s+/);
                   let chunks = [];
@@ -142,12 +140,11 @@ export default function App() {
               });
           }
 
-          // --- 第 2 步：防漏翻机制 (打标签 ID + 强类型 JSON 返回) ---
+          // --- 第 2 步：防漏翻机制 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
           
-          // 给每句话标上 ID，大模型将无法漏翻
           const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
           
           const translationPrompt = `You are a professional subtitle translator.
@@ -180,7 +177,7 @@ export default function App() {
               model: textModel.trim(),
               messages: [{ role: 'user', content: translationPrompt }],
               temperature: 0.1,
-              response_format: { type: "json_object" } // 强行锁死返回结构，杜绝乱码和截断
+              response_format: { type: "json_object" } 
             })
           });
 
@@ -202,7 +199,7 @@ export default function App() {
              throw new Error("大模型未返回合规的 JSON 数据，请重试。");
           }
 
-          // --- 第 4 步：融合组装 (根据 ID 精确绑定，拒绝错位) ---
+          // --- 第 4 步：融合组装 ---
           setProcessStep(4);
           const finalSubtitles = finalSourceSegments.map((seg, i) => {
             const matchObj = translatedData.find(t => t.id === i) || {};
@@ -236,7 +233,8 @@ export default function App() {
 
   // ================= 播放器与拖动同步 =================
   useEffect(() => {
-    if (currentView === 'editor' && audioRef.current) {
+    // 监听播放状态，控制全局音频
+    if ((currentView === 'editor' || currentView === 'preview') && audioRef.current) {
       if (isPlaying) {
         audioRef.current.play();
       } else {
@@ -251,7 +249,6 @@ export default function App() {
     }
   };
 
-  // 用户拖动进度条事件
   const handleSeek = (e) => {
     const newTime = parseFloat(e.target.value);
     setCurrentTime(newTime);
@@ -292,6 +289,17 @@ export default function App() {
     const s = Math.floor(seconds % 60);
     const ms = Math.floor((seconds % 1) * 10);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+  };
+
+  // 获取格式化的今天日期（用于成品预览界面）
+  const getFormattedDate = () => {
+    const date = new Date();
+    return date.toLocaleDateString('zh-CN', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric', 
+      weekday: 'long' 
+    });
   };
 
   // --- 视图渲染 ---
@@ -514,10 +522,10 @@ export default function App() {
           </button>
         </header>
 
-        {/* 预览区 */}
-        <div className="relative w-full h-[45%] bg-gray-900 flex flex-col justify-center overflow-hidden">
+        {/* 预览区 (小视图) */}
+        <div className="relative w-full h-[35%] bg-gray-900 flex flex-col justify-center overflow-hidden">
           <img src={formData.bgUrl} alt="Background" className="absolute inset-0 w-full h-full object-cover opacity-60" />
-          <div className="relative z-10 w-full px-6 flex flex-col items-center justify-center text-center mt-auto mb-10 min-h-[80px]">
+          <div className="relative z-10 w-full px-6 flex flex-col items-center justify-center text-center mt-auto mb-6 min-h-[80px]">
             {activeSubtitle ? (
               <div className="bg-black/50 backdrop-blur-md p-3 rounded-xl border border-white/10 w-full max-w-[95%] transform transition-all">
                 <p className="text-white font-bold text-lg mb-1 leading-tight drop-shadow-md">{activeSubtitle.en}</p>
@@ -529,13 +537,10 @@ export default function App() {
 
         {/* ================= 可拖动进度条与播放控制 ================= */}
         <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center space-x-3 text-white">
-           <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
            <button onClick={() => setIsPlaying(!isPlaying)} className="w-10 h-10 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 shrink-0">
              {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
            </button>
            <div className="flex-1 space-y-2">
-             
-             {/* 核心改动：原生的 input range 滑动条，支持拖拽 */}
              <input 
                type="range"
                min="0"
@@ -545,7 +550,6 @@ export default function App() {
                onChange={handleSeek}
                className="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer accent-blue-500 outline-none"
              />
-
              <div className="flex justify-between text-[10px] text-gray-400 font-mono">
                <span>{formatTime(currentTime)}</span>
                <span>{formData.audioDuration ? formatTime(formData.audioDuration) : '00:00.0'}</span>
@@ -553,16 +557,17 @@ export default function App() {
            </div>
         </div>
 
-        {/* 编辑器 */}
-        <div className="flex-1 bg-gray-50 overflow-y-auto pb-6 relative rounded-t-2xl -mt-2 z-10">
-          <div className="sticky top-0 bg-gray-50/90 backdrop-blur-md px-4 py-3 border-b border-gray-200 flex justify-between items-center z-10">
+        {/* 编辑器列表 */}
+        <div className="flex-1 bg-gray-50 overflow-y-auto relative rounded-t-2xl -mt-2 z-10 flex flex-col">
+          <div className="sticky top-0 bg-gray-50/90 backdrop-blur-md px-4 py-3 border-b border-gray-200 flex justify-between items-center z-10 shrink-0">
             <h3 className="text-sm font-bold text-gray-700 flex items-center">
               <Edit3 size={16} className="mr-2 text-blue-500" />
               调整字幕内容
             </h3>
             <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">共 {subtitles.length} 句</span>
           </div>
-          <div className="p-4 space-y-4">
+          
+          <div className="p-4 space-y-4 flex-1">
             {subtitles.map((sub, index) => {
               const isActive = currentTime >= sub.start && currentTime <= sub.end;
               return (
@@ -596,6 +601,89 @@ export default function App() {
               );
             })}
           </div>
+
+          {/* 新增：固定在后台编辑器底部的预览按钮 */}
+          <div className="bg-white border-t border-gray-200 p-4 shrink-0 z-20 shadow-[0_-4px_10px_-1px_rgba(0,0,0,0.08)]">
+            <button 
+              onClick={() => setCurrentView('preview')}
+              className="w-full bg-blue-600 text-white rounded-xl py-3.5 font-semibold text-sm flex justify-center items-center shadow-lg hover:bg-blue-700 transition-all active:scale-[0.98]"
+            >
+              <Eye size={18} className="mr-2" />
+              查看成品预览 (全屏)
+            </button>
+          </div>
+
+        </div>
+      </div>
+    );
+  };
+
+  // ================= 新增：全屏成品预览视图 =================
+  const renderPreview = () => {
+    const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
+    
+    return (
+      <div 
+        className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer"
+        onClick={() => setIsPlaying(!isPlaying)} // 点击屏幕任意位置播放/暂停
+      >
+        {/* 背景图片 */}
+        <img 
+          src={formData.bgUrl} 
+          alt="Background" 
+          className="absolute inset-0 w-full h-full object-cover opacity-80" 
+        />
+        
+        {/* 返回按钮 (悬浮在左上角) */}
+        <button 
+          onClick={(e) => { 
+            e.stopPropagation(); 
+            setCurrentView('editor'); 
+          }} 
+          className="absolute top-6 left-4 z-20 p-2.5 rounded-full bg-black/30 text-white hover:bg-black/60 transition-colors backdrop-blur-md"
+        >
+          <ChevronLeft size={24} />
+        </button>
+
+        {/* 顶部标题区 */}
+        <div className="absolute top-20 left-0 right-0 z-10 flex flex-col items-center justify-center text-white px-6 text-center drop-shadow-xl">
+          <h1 className="text-5xl sm:text-6xl font-extrabold tracking-tight mb-3 font-sans">
+            KidNuz
+          </h1>
+          <p className="text-lg sm:text-xl font-medium opacity-95">
+            {getFormattedDate()}
+          </p>
+        </div>
+
+        {/* 字幕显示区 */}
+        <div className="relative z-10 flex-1 flex flex-col items-center justify-center px-8 text-center mt-32">
+          {activeSubtitle ? (
+            <div className="space-y-6 w-full max-w-2xl bg-black/20 backdrop-blur-sm p-6 rounded-2xl">
+              <p className="text-white font-bold text-3xl sm:text-4xl leading-snug drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+                {activeSubtitle.en}
+              </p>
+              <p className="text-yellow-400 font-bold text-2xl sm:text-3xl leading-snug drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
+                {activeSubtitle.zh}
+              </p>
+            </div>
+          ) : null}
+        </div>
+
+        {/* 播放暂停指示器提示 (仅在暂停时隐约显示) */}
+        {!isPlaying && (
+          <div className="absolute inset-0 z-0 flex items-center justify-center pointer-events-none">
+            <div className="bg-black/40 rounded-full p-6 backdrop-blur-sm">
+              <Play size={64} fill="currentColor" className="text-white opacity-80 ml-2" />
+            </div>
+          </div>
+        )}
+
+        {/* 底部极简进度条 */}
+        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800/50 z-20">
+          <div 
+            className="h-full bg-yellow-400/80 transition-all duration-100 ease-linear"
+            style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}
+          ></div>
         </div>
       </div>
     );
@@ -603,12 +691,22 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-200 flex items-center justify-center p-0 sm:p-4">
+      {/* 提取到最外层的全局隐藏音频组件 */}
+      <audio 
+        ref={audioRef} 
+        src={formData.audioUrl} 
+        onTimeUpdate={handleTimeUpdate} 
+        onEnded={() => setIsPlaying(false)} 
+        className="hidden" 
+      />
+      
       <div className="w-full max-w-[400px] h-[100dvh] sm:h-[800px] bg-white sm:rounded-[2.5rem] shadow-2xl overflow-hidden relative border-[8px] border-gray-900/5">
         <div className="hidden sm:block absolute top-0 left-1/2 -translate-x-1/2 w-32 h-6 bg-gray-900/5 rounded-b-xl z-50 pointer-events-none"></div>
         {currentView === 'dashboard' && renderDashboard()}
         {currentView === 'upload' && renderUpload()}
         {currentView === 'processing' && renderProcessing()}
         {currentView === 'editor' && renderEditor()}
+        {currentView === 'preview' && renderPreview()}
       </div>
     </div>
   );
