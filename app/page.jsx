@@ -75,8 +75,8 @@ export default function App() {
           audioData.append('model', audioModel.trim());
           audioData.append('response_format', 'verbose_json'); // 强制要求返回带时间的分段数据
           audioData.append('timestamp_granularities[]', 'segment'); 
-          // 将原稿作为提示词传入，提高专有名词识别准确率
-          if (formData.rawText) audioData.append('prompt', formData.rawText.substring(0, 1000));
+          // 将原稿作为提示词传入，提高专有名词识别准确率。部分接口限制 896 字符以内，此处截取前 800 字符。
+          if (formData.rawText) audioData.append('prompt', formData.rawText.substring(0, 800));
 
           const whisperRes = await fetch(whisperUrl, {
             method: 'POST',
