@@ -4,226 +4,175 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, FileText, Image as ImageIcon, 
   Play, Pause, Plus, ChevronLeft, Settings, 
-  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, RefreshCw
+  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, Link as LinkIcon, Mic, MessageSquare
 } from 'lucide-react';
 
-// 模拟初始的测试数据
+// 模拟初始测试数据
 const MOCK_PROJECTS = [
   { id: 1, title: '苹果秋季发布会_片段1', date: '2023-10-24', duration: '03:12' },
-  { id: 2, title: 'TED演讲_如何控制情绪', date: '2023-10-22', duration: '15:45' },
-];
-
-const MOCK_SUBTITLES = [
-  { id: 1, start: 0, end: 3, en: "Welcome to today's special event.", zh: "欢迎来到今天的特别活动。" },
-  { id: 2, start: 3, end: 6.5, en: "We have some incredible new products to share with you.", zh: "我们有一些令人难以置信的新产品要与大家分享。" },
-  { id: 3, start: 6.5, end: 9, en: "Let's dive right in and take a look.", zh: "让我们直接开始看看吧。" },
-  { id: 4, start: 9, end: 12, en: "The performance is simply astonishing.", zh: "这个性能简直令人震惊。" },
-  { id: 5, start: 12, end: 15, en: "And it's all powered by our latest silicon.", zh: "而这一切都得益于我们最新的芯片。" }
 ];
 
 export default function App() {
-  // 视图状态: 'dashboard', 'upload', 'processing', 'editor'
   const [currentView, setCurrentView] = useState('dashboard');
   
-  // API Key 和模型选择状态
-  const [apiKey, setApiKey] = useState('');
-  const [aiModel, setAiModel] = useState('gemini-1.5-flash'); 
-  const [availableModels, setAvailableModels] = useState([
-    'gemini-1.5-flash', 
-    'gemini-1.5-pro', 
-    'gemini-2.0-flash', 
-    'gemini-pro'
-  ]);
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
+  // ================= API 配置状态 (双通道) =================
+  // 1. 语音/对齐 API (WhisperX / OpenAI 标准)
+  const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.openai.com/v1');
+  const [audioKey, setAudioKey] = useState('');
+  const [audioModel, setAudioModel] = useState('whisper-1');
+  
+  // 2. 翻译 API (大语言模型 LLM)
+  const [textBaseUrl, setTextBaseUrl] = useState('https://api.openai.com/v1');
+  const [textKey, setTextKey] = useState('');
+  const [textModel, setTextModel] = useState('gpt-3.5-turbo');
 
-  // 初始化时从本地读取 API Key
+  // 初始化时从本地读取配置
   useEffect(() => {
-    const storedKey = localStorage.getItem('gemini_api_key');
-    if (storedKey) setApiKey(storedKey);
+    if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
+    if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
+    if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
+    
+    if (localStorage.getItem('wx_text_url')) setTextBaseUrl(localStorage.getItem('wx_text_url'));
+    if (localStorage.getItem('wx_text_key')) setTextKey(localStorage.getItem('wx_text_key'));
+    if (localStorage.getItem('wx_text_model')) setTextModel(localStorage.getItem('wx_text_model'));
   }, []);
   
-  // 上传表单状态
+  // ================= 业务状态 =================
   const [formData, setFormData] = useState({
     title: '新建音频字幕项目',
+    audioFile: null, // 直接保存 File 对象，解决大文件 Base64 限制
     audioName: '',
     audioUrl: '',
     audioDuration: 0,
-    audioBase64: '', 
-    audioMimeType: '',
-    textName: '',
     rawText: '',
     bgName: '',
     bgUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop'
   });
 
-  // 编辑器状态
   const [subtitles, setSubtitles] = useState([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [processStep, setProcessStep] = useState(0);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const audioRef = useRef(null);
 
-  // 动态获取可用模型列表
-  const handleFetchModels = async () => {
-    if (!apiKey) {
-      alert("请先在上方输入您的 Gemini API Key！");
-      return;
-    }
-    setIsFetchingModels(true);
-    try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error?.message || `HTTP 错误 ${res.status}`);
-      }
-      const data = await res.json();
-      
-      // 过滤出支持 generateContent 方法的模型，并去除 "models/" 前缀
-      if (data.models) {
-        const validModels = data.models
-          .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
-          .map(m => m.name.replace('models/', ''));
-        
-        if (validModels.length > 0) {
-          setAvailableModels(validModels);
-          // 如果当前选中的模型不在新列表中，自动选中第一个
-          if (!validModels.includes(aiModel)) {
-            setAiModel(validModels[0]);
-          }
-          alert(`成功！已从 Google 获取到 ${validModels.length} 个您的 Key 可用的模型，下拉框已更新。`);
-        } else {
-          alert("未找到支持文本生成的模型权限。");
-        }
-      }
-    } catch (error) {
-      alert(`获取模型列表失败: ${error.message}`);
-    } finally {
-      setIsFetchingModels(false);
-    }
-  };
-
-  // API Retry Logic (网络请求防抖与重试)
-  const fetchWithRetry = async (url, options, retries = 5) => {
-    const delays = [1000, 2000, 4000, 8000, 16000];
-    for (let i = 0; i < retries; i++) {
-      try {
-        const res = await fetch(url, options);
-        if (!res.ok) {
-          let errMsg = `HTTP 请求失败 (状态码: ${res.status})`;
-          try {
-            const errData = await res.json();
-            if(errData.error) errMsg += ` - ${errData.error.message || errData.error}`;
-          } catch(parseErr) {
-            const errText = await res.text();
-            if(errText) errMsg += `\n详情: ${errText.substring(0, 100)}...`;
-          }
-          throw new Error(errMsg);
-        }
-        return await res.json();
-      } catch (e) {
-        if (i === retries - 1) throw e;
-        await new Promise(r => setTimeout(r, delays[i]));
-      }
-    }
-  };
-
-  // 真实的AI处理流程与精确时间对齐
+  // ================= 核心处理逻辑 (Whisper + LLM) =================
   useEffect(() => {
-    if (currentView === 'processing') {
+    if (currentView === 'processing' && !isProcessing) {
       const processVideo = async () => {
+        setIsProcessing(true);
         try {
-          setProcessStep(0);
+          if (!formData.audioFile) throw new Error("缺少音频文件！");
+          
+          // --- 第 1 步：调用 Whisper(X) 接口进行听写与毫秒级时间轴对齐 ---
           setProcessStep(1);
+          const cleanAudioUrl = audioBaseUrl.trim().replace(/\/+$/, '');
+          const whisperUrl = `${cleanAudioUrl}/audio/transcriptions`;
           
-          if (!apiKey || !apiKey.startsWith("AI")) {
-             throw new Error("请先在上传页面上方填入有效的 Gemini API Key！");
-          }
+          const audioData = new FormData();
+          audioData.append('file', formData.audioFile);
+          audioData.append('model', audioModel.trim());
+          audioData.append('response_format', 'verbose_json'); // 强制要求返回带时间的分段数据
+          audioData.append('timestamp_granularities[]', 'segment'); 
+          // 将原稿作为提示词传入，提高专有名词识别准确率
+          if (formData.rawText) audioData.append('prompt', formData.rawText.substring(0, 1000));
 
-          // 动态使用用户选择的模型
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${aiModel}:generateContent?key=${apiKey}`; 
-          
-          const prompt = `I am providing an audio file and its English transcript. 
-          Transcript: ${formData.rawText}
-
-          Task:
-          1. Segment the transcript into logical subtitle sentences (roughly 5-12 words each).
-          2. Listen to the audio to determine the PRECISE start and end times (in seconds) for each segment.
-          3. Translate each segment into natural Chinese.
-          4. Return ONLY a valid JSON array. Do not output any other text or markdown.`;
-
-          // 直接将原始文本和音频的 base64 编码发给 Google
-          const payload = {
-            contents: [{ 
-              parts: [
-                { text: prompt },
-                ...(formData.audioBase64 ? [{ inlineData: { mimeType: formData.audioMimeType || "audio/mp3", data: formData.audioBase64 } }] : [])
-              ] 
-            }],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: "ARRAY",
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    start: { type: "NUMBER" },
-                    end: { type: "NUMBER" },
-                    en: { type: "STRING" },
-                    zh: { type: "STRING" }
-                  }
-                }
-              }
-            }
-          };
-
-          const data = await fetchWithRetry(url, {
+          const whisperRes = await fetch(whisperUrl, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            headers: { 'Authorization': `Bearer ${audioKey}` },
+            body: audioData
           });
 
-          if (!data || !data.candidates || !data.candidates[0]) {
-             throw new Error("Google AI 返回了异常的数据结构。");
+          if (!whisperRes.ok) {
+            const err = await whisperRes.json().catch(()=>({}));
+            throw new Error(`Whisper 语音识别失败: ${err.error?.message || whisperRes.status}`);
+          }
+          
+          const whisperResult = await whisperRes.json();
+          if (!whisperResult.segments) throw new Error("语音接口未返回分段(segments)时间轴数据，请检查所用模型是否支持 verbose_json。");
+          
+          // --- 第 2 步：提取英文文本并调用大模型进行批量翻译 ---
+          setProcessStep(2);
+          const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
+          const chatUrl = `${cleanTextUrl}/chat/completions`;
+          
+          const englishTexts = whisperResult.segments.map(s => s.text.trim());
+          const translationPrompt = `You are a subtitle translator. Translate the following English subtitle segments into natural Chinese. 
+          Return ONLY a valid JSON array of strings, with exact same length and order. Do not include markdown formatting or extra text.
+          
+          Segments to translate:
+          ${JSON.stringify(englishTexts)}`;
+
+          const llmRes = await fetch(chatUrl, {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${textKey}` 
+            },
+            body: JSON.stringify({
+              model: textModel.trim(),
+              messages: [{ role: 'user', content: translationPrompt }],
+              temperature: 0.3
+            })
+          });
+
+          if (!llmRes.ok) {
+            const err = await llmRes.json().catch(()=>({}));
+            throw new Error(`LLM 翻译失败: ${err.error?.message || llmRes.status}`);
           }
 
-          setProcessStep(2);
-          
-          // 解析 Google 直接返回的数据
-          const segmentsText = data.candidates[0].content.parts[0].text;
-          const segments = JSON.parse(segmentsText);
-          
           setProcessStep(3);
+          const llmResult = await llmRes.json();
+          const responseText = llmResult.choices[0].message.content;
           
-          // 使用大模型听取音频后返回的精确时间
-          const newSubtitles = segments.map((seg, i) => {
+          // 健壮的 JSON 解析提取
+          let translatedTexts = [];
+          try {
+             const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+             if (jsonMatch) {
+               translatedTexts = JSON.parse(jsonMatch[0]);
+             } else {
+               translatedTexts = JSON.parse(responseText);
+             }
+          } catch (e) {
+             console.warn("解析大模型 JSON 返回失败，尝试降级处理:", responseText);
+             // 如果解析失败，则按换行符强行分割
+             translatedTexts = responseText.split('\n').filter(t => t.trim().length > 0);
+          }
+
+          // --- 第 4 步：融合组装最终字幕数据 ---
+          setProcessStep(4);
+          const finalSubtitles = whisperResult.segments.map((seg, i) => {
             return { 
               id: i + 1, 
-              start: typeof seg.start === 'number' ? seg.start : 0, 
-              end: typeof seg.end === 'number' ? seg.end : 0, 
-              en: seg.en || "", 
-              zh: seg.zh || "" 
+              start: seg.start, 
+              end: seg.end, 
+              en: seg.text.trim(), 
+              zh: translatedTexts[i] || "" // 匹配对应的中文
             };
           });
 
           setTimeout(() => {
-            setSubtitles(newSubtitles);
+            setSubtitles(finalSubtitles);
             setCurrentView('editor');
             setCurrentTime(0);
-          }, 1000);
+            setIsProcessing(false);
+          }, 800);
 
         } catch (error) {
-          console.error("处理失败详细信息:", error);
-          alert(`处理失败！\n\n【错误详情】:\n${error.message}`);
+          console.error("处理失败:", error);
+          alert(`合成失败！\n\n【错误详情】:\n${error.message}`);
+          setIsProcessing(false);
           setCurrentView('upload');
         }
       };
 
       processVideo();
     }
-  }, [currentView, formData, apiKey, aiModel]);
+  }, [currentView, isProcessing]);
 
-  // 真实的播放器控制
+  // 播放器控制
   useEffect(() => {
     if (currentView === 'editor' && audioRef.current) {
       if (isPlaying) {
@@ -240,7 +189,6 @@ export default function App() {
     }
   };
 
-  // 导出 SRT 功能
   const handleExport = () => {
     let srtContent = "";
     subtitles.forEach((sub, i) => {
@@ -275,24 +223,21 @@ export default function App() {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
   };
 
-  // --- 视图组件 ---
+  // --- 视图渲染 ---
 
   const renderDashboard = () => (
     <div className="flex flex-col h-full bg-gray-50">
       <header className="bg-white shadow-sm px-6 py-5 flex justify-between items-center">
         <div>
           <h1 className="text-xl font-bold text-gray-800">控制台</h1>
-          <p className="text-xs text-gray-500 mt-1">管理员专属合成工具 <span className="text-indigo-500 font-bold ml-1">(安全直连版)</span></p>
+          <p className="text-xs text-gray-500 mt-1">管理员工作台 <span className="text-blue-500 font-bold ml-1">(Whisper 专用版)</span></p>
         </div>
-        <button className="p-2 rounded-full hover:bg-gray-100">
-          <Settings size={20} className="text-gray-600" />
-        </button>
       </header>
 
       <main className="flex-1 overflow-y-auto p-6">
         <button 
           onClick={() => setCurrentView('upload')}
-          className="w-full bg-indigo-600 text-white rounded-xl py-4 flex items-center justify-center space-x-2 font-medium shadow-md hover:bg-indigo-700 active:scale-95 transition-all"
+          className="w-full bg-blue-600 text-white rounded-xl py-4 flex items-center justify-center space-x-2 font-medium shadow-md hover:bg-blue-700 active:scale-95 transition-all"
         >
           <Plus size={20} />
           <span>新建合成项目</span>
@@ -302,10 +247,10 @@ export default function App() {
           <h2 className="text-sm font-semibold text-gray-500 mb-4 uppercase tracking-wider">最近项目</h2>
           <div className="space-y-3">
             {MOCK_PROJECTS.map(proj => (
-              <div key={proj.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between cursor-pointer hover:border-indigo-300 transition-colors">
+              <div key={proj.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex items-center justify-between cursor-pointer hover:border-blue-300 transition-colors">
                 <div className="flex items-center space-x-4">
-                  <div className="bg-indigo-100 p-3 rounded-lg">
-                    <FileAudio size={20} className="text-indigo-600" />
+                  <div className="bg-blue-100 p-3 rounded-lg">
+                    <FileAudio size={20} className="text-blue-600" />
                   </div>
                   <div>
                     <h3 className="font-medium text-gray-800">{proj.title}</h3>
@@ -323,88 +268,89 @@ export default function App() {
 
   const renderUpload = () => (
     <div className="flex flex-col h-full bg-gray-50">
-      <header className="bg-white px-4 py-4 flex items-center shadow-sm relative z-10">
+      <header className="bg-white px-4 py-4 flex items-center shadow-sm relative z-10 shrink-0">
         <button onClick={() => setCurrentView('dashboard')} className="p-2 -ml-2 rounded-full hover:bg-gray-100">
           <ChevronLeft size={24} className="text-gray-700" />
         </button>
-        <h1 className="text-lg font-bold text-gray-800 ml-2">上传素材</h1>
+        <h1 className="text-lg font-bold text-gray-800 ml-2">素材与系统配置</h1>
       </header>
 
-      <main className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
-        {/* API Key 与模型动态获取配置区 */}
-        <div className="space-y-3 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
-          <label className="text-sm font-bold text-indigo-900 flex items-center">
-            <Key size={16} className="mr-2 text-indigo-500" />
-            系统配置 (仅管理员可见)
-          </label>
-          <input 
-            type="password" 
-            placeholder="请输入您的 Gemini API Key (AIzaSy...)"
-            value={apiKey}
-            onChange={(e) => {
-              setApiKey(e.target.value);
-              localStorage.setItem('gemini_api_key', e.target.value);
-            }}
-            className="w-full bg-white border border-indigo-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none placeholder-gray-400 shadow-sm"
-          />
-          <div className="flex items-center space-x-2">
-            <span className="text-xs text-indigo-700 font-medium whitespace-nowrap">AI 模型:</span>
-            <select
-              value={aiModel}
-              onChange={(e) => setAiModel(e.target.value)}
-              className="flex-1 bg-white border border-indigo-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-gray-700 shadow-sm"
-            >
-              {availableModels.map(model => (
-                <option key={model} value={model}>{model}</option>
-              ))}
-            </select>
-            <button
-              onClick={handleFetchModels}
-              disabled={isFetchingModels || !apiKey}
-              className="flex items-center justify-center bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg text-xs font-semibold hover:bg-indigo-200 disabled:opacity-50 transition-colors"
-            >
-              <RefreshCw size={14} className={`mr-1 ${isFetchingModels ? 'animate-spin' : ''}`} />
-              {isFetchingModels ? '获取中' : '刷新列表'}
-            </button>
+      <main className="flex-1 overflow-y-auto p-5 space-y-6 pb-24">
+        {/* ================= 双通道 API 配置区 ================= */}
+        <div className="space-y-4">
+          
+          {/* 通道1: Whisper */}
+          <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 space-y-2">
+            <label className="text-sm font-bold text-blue-900 flex items-center mb-3">
+              <Mic size={16} className="mr-2 text-blue-500" />
+              1. 语音对齐接口 (WhisperX 兼容)
+            </label>
+            <input 
+              type="text" placeholder="Base URL (例: https://api.openai.com/v1)" value={audioBaseUrl}
+              onChange={(e) => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }}
+              className="w-full bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+            <div className="flex space-x-2">
+              <input 
+                type="password" placeholder="API Key" value={audioKey}
+                onChange={(e) => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key', e.target.value); }}
+                className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+              />
+              <input 
+                type="text" placeholder="模型 (如: whisper-1)" value={audioModel}
+                onChange={(e) => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model', e.target.value); }}
+                className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+              />
+            </div>
           </div>
-          <p className="text-[10px] text-indigo-400 mt-1">
-            * 填入 Key 后点击“刷新列表”，即可拉取并使用您账号专属的最新大模型。
-          </p>
-        </div>
 
-        {/* 项目名称 */}
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-gray-700">项目名称</label>
-          <input 
-            type="text" 
-            value={formData.title}
-            onChange={(e) => setFormData({...formData, title: e.target.value})}
-            className="w-full bg-white border border-gray-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none"
-          />
+          {/* 通道2: LLM */}
+          <div className="bg-purple-50/50 p-4 rounded-xl border border-purple-100 space-y-2">
+            <label className="text-sm font-bold text-purple-900 flex items-center mb-3">
+              <MessageSquare size={16} className="mr-2 text-purple-500" />
+              2. 文本翻译接口 (LLM 大语言模型)
+            </label>
+            <input 
+              type="text" placeholder="Base URL (例: https://api.openai.com/v1)" value={textBaseUrl}
+              onChange={(e) => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url', e.target.value); }}
+              className="w-full bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
+            />
+            <div className="flex space-x-2">
+              <input 
+                type="password" placeholder="API Key" value={textKey}
+                onChange={(e) => { setTextKey(e.target.value); localStorage.setItem('wx_text_key', e.target.value); }}
+                className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
+              />
+              <input 
+                type="text" placeholder="模型 (如: gpt-3.5-turbo)" value={textModel}
+                onChange={(e) => { setTextModel(e.target.value); localStorage.setItem('wx_text_model', e.target.value); }}
+                className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
+              />
+            </div>
+          </div>
+
         </div>
 
         {/* 1. 上传音频 */}
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
-            <span className="bg-indigo-100 text-indigo-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">1</span>
+            <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">1</span>
             主音频文件 (必填)
           </label>
-          <div className="border-2 border-dashed border-gray-300 rounded-xl bg-white hover:bg-gray-50 transition-colors p-6 flex flex-col items-center justify-center relative overflow-hidden group">
+          <div className="border-2 border-dashed border-gray-300 rounded-xl bg-white hover:bg-gray-50 p-6 flex flex-col items-center relative overflow-hidden group">
             {formData.audioName ? (
               <div className="text-center">
                 <FileAudio size={32} className="text-green-500 mx-auto mb-2" />
                 <p className="text-sm font-medium text-gray-700">{formData.audioName}</p>
-                <p className="text-xs text-gray-400 mt-1">点击重新上传</p>
               </div>
             ) : (
-              <div className="text-center text-gray-500 group-hover:text-indigo-500">
+              <div className="text-center text-gray-500">
                 <Upload size={28} className="mx-auto mb-2" />
                 <p className="text-sm">点击上传音频 (MP3/WAV)</p>
               </div>
             )}
             <input 
-              type="file" 
-              accept="audio/*" 
+              type="file" accept="audio/*" 
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               onChange={(e) => {
                 const file = e.target.files[0];
@@ -412,109 +358,39 @@ export default function App() {
                   const url = URL.createObjectURL(file);
                   const tempAudio = new Audio(url);
                   tempAudio.onloadedmetadata = () => {
-                    setFormData(prev => ({...prev, audioName: file.name, audioUrl: url, audioDuration: tempAudio.duration}));
+                    setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: url, audioDuration: tempAudio.duration}));
                   };
-                  
-                  const reader = new FileReader();
-                  reader.onload = (event) => {
-                    const base64String = event.target.result.split(',')[1];
-                    setFormData(prev => ({
-                      ...prev, 
-                      audioBase64: base64String, 
-                      audioMimeType: file.type || 'audio/mp3'
-                    }));
-                  };
-                  reader.readAsDataURL(file);
                 }
               }}
             />
           </div>
         </div>
 
-        {/* 2. 上传英文字幕 */}
+        {/* 2. 英文原稿 (Prompt) */}
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
-            <span className="bg-indigo-100 text-indigo-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-            英文字稿/字幕 (必填)
+            <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
+            参考原稿 (选填)
           </label>
-          <div className="border border-gray-300 rounded-xl bg-white overflow-hidden flex flex-col">
-            <textarea 
-              placeholder="请粘贴英文原稿，或上传TXT文件。AI将自动进行断句和翻译..."
-              className="w-full h-24 p-4 text-sm resize-none outline-none"
-              value={formData.rawText || ''}
-              onChange={(e) => setFormData({...formData, rawText: e.target.value})}
-            ></textarea>
-            <div className="bg-gray-50 border-t border-gray-200 px-4 py-2 flex justify-between items-center relative">
-               <span className="text-xs text-gray-500">或上传TXT文件</span>
-               <button className="text-indigo-600 text-sm font-medium flex items-center">
-                 <FileText size={16} className="mr-1"/> 浏览文件
-               </button>
-               <input 
-                  type="file" 
-                  accept=".txt,.srt" 
-                  className="absolute right-0 top-0 w-1/2 h-full opacity-0 cursor-pointer"
-                  onChange={(e) => {
-                    const file = e.target.files[0];
-                    if (file) {
-                      const reader = new FileReader();
-                      reader.onload = (event) => {
-                        setFormData({...formData, textName: file.name, rawText: event.target.result});
-                      };
-                      reader.readAsText(file);
-                    }
-                  }}
-                />
-            </div>
-          </div>
-          {formData.textName && <p className="text-xs text-green-600 mt-1">已选择: {formData.textName}</p>}
-        </div>
-
-        {/* 3. 背景设置 */}
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-gray-700 flex items-center">
-            <span className="bg-indigo-100 text-indigo-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">3</span>
-            视频背景 (可选)
-          </label>
-          <div className="flex space-x-4 h-24">
-            <div className="w-1/3 rounded-lg overflow-hidden relative border border-gray-200 shadow-sm">
-               <img src={formData.bgUrl} alt="bg" className="w-full h-full object-cover" />
-            </div>
-            <div className="w-2/3 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center bg-white relative cursor-pointer hover:bg-gray-50">
-               <ImageIcon size={24} className="text-gray-400 mb-1" />
-               <span className="text-xs text-gray-500">更换背景图</span>
-               <input 
-                 type="file" 
-                 accept="image/*" 
-                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
-                 onChange={(e) => {
-                   const file = e.target.files[0];
-                   if (file) {
-                     setFormData({...formData, bgName: file.name, bgUrl: URL.createObjectURL(file)});
-                   }
-                 }}
-               />
-            </div>
-          </div>
+          <textarea 
+            placeholder="如果包含专有名词，建议粘贴英文原稿。WhisperX 将自动对齐..."
+            className="w-full h-20 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500"
+            value={formData.rawText}
+            onChange={(e) => setFormData({...formData, rawText: e.target.value})}
+          />
         </div>
       </main>
 
-      {/* 底部按钮悬浮 */}
-      <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+      <div className="absolute bottom-0 left-0 right-0 bg-white border-t border-gray-200 p-4 shadow-lg shrink-0 z-20">
         <button 
           onClick={() => {
-            if (!formData.audioUrl || !formData.rawText) {
-              if (!formData.audioUrl) alert("请先上传音频文件");
-              return; 
-            }
-            if (!apiKey) {
-              alert("请在页面上方填入您的 Gemini API Key");
-              return;
-            }
+            if (!formData.audioFile) { alert("请先上传音频文件"); return; }
+            if (!audioKey || !textKey) { alert("请完善上方 Whisper 和翻译大模型的 API 密钥！"); return; }
             setCurrentView('processing');
           }}
-          className="w-full bg-indigo-600 text-white rounded-xl py-3.5 font-semibold text-sm flex justify-center items-center shadow-lg hover:bg-indigo-700"
+          className="w-full bg-gray-900 text-white rounded-xl py-3.5 font-semibold text-sm hover:bg-black shadow-md transition-all active:scale-[0.98]"
         >
-          开始 AI 智能合成
+          开始 WhisperX 高精度对齐
         </button>
       </div>
     </div>
@@ -522,117 +398,73 @@ export default function App() {
 
   const renderProcessing = () => {
     const steps = [
-      "上传并解析文件...",
-      "AI 深度听取音频并提取音素特征...",
-      "原文断句与毫秒级时间轴精准对齐...",
-      "大模型智能中英双语翻译..."
+      "准备处理通道...",
+      "1. Whisper(X) 引擎正在精准识别与时间对齐...",
+      "2. 提取分段字幕...",
+      "3. 正在呼叫大语言模型进行批量翻译...",
+      "完成数据组合装载..."
     ];
 
     return (
-      <div className="flex flex-col h-full bg-indigo-600 justify-center items-center text-white p-8 relative overflow-hidden">
-        {/* 背景装饰 */}
-        <div className="absolute inset-0 opacity-10">
-           <div className="absolute top-10 left-10 w-32 h-32 rounded-full bg-white blur-2xl animate-pulse"></div>
-           <div className="absolute bottom-20 right-10 w-48 h-48 rounded-full bg-indigo-300 blur-3xl animate-pulse delay-700"></div>
-        </div>
-
-        <div className="relative z-10 flex flex-col items-center w-full max-w-xs">
-          <Loader2 size={48} className="animate-spin text-indigo-200 mb-8" />
-          
-          <h2 className="text-xl font-bold mb-6">AI 正在处理中</h2>
-          
-          <div className="w-full space-y-4">
-            {steps.map((text, idx) => {
-              const isPast = processStep > idx;
-              const isCurrent = processStep === idx;
-              return (
-                <div key={idx} className="flex items-center space-x-3 text-sm">
-                  {isPast ? (
-                    <CheckCircle size={18} className="text-green-400" />
-                  ) : isCurrent ? (
-                    <div className="w-4 h-4 rounded-full border-2 border-indigo-300 border-t-white animate-spin"></div>
-                  ) : (
-                    <div className="w-4 h-4 rounded-full border-2 border-indigo-400 opacity-50"></div>
-                  )}
-                  <span className={`${isPast ? 'text-indigo-200 line-through opacity-80' : isCurrent ? 'text-white font-medium' : 'text-indigo-300 opacity-50'}`}>
-                    {text}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="mt-12 w-full bg-indigo-800 rounded-full h-1.5 overflow-hidden">
-             <div 
-               className="bg-white h-full transition-all duration-300 ease-out" 
-               style={{ width: `${(processStep / steps.length) * 100}%` }}
-             ></div>
-          </div>
+      <div className="flex flex-col h-full bg-gray-900 justify-center items-center text-white p-8 relative overflow-hidden">
+        <Loader2 size={48} className="animate-spin text-blue-400 mb-8" />
+        <h2 className="text-xl font-bold mb-6">正在处理数据</h2>
+        <div className="w-full space-y-4">
+          {steps.map((text, idx) => {
+            const isPast = processStep > idx;
+            const isCurrent = processStep === idx;
+            return (
+              <div key={idx} className="flex items-center space-x-3 text-sm">
+                {isPast ? <CheckCircle size={18} className="text-green-400 shrink-0" /> 
+                 : isCurrent ? <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-white animate-spin shrink-0"></div> 
+                 : <div className="w-4 h-4 rounded-full border-2 border-gray-600 shrink-0"></div>}
+                <span className={`${isPast ? 'text-gray-400' : isCurrent ? 'text-white font-medium' : 'text-gray-600'}`}>{text}</span>
+              </div>
+            )
+          })}
         </div>
       </div>
     );
   };
 
   const renderEditor = () => {
-    // 找出当前时间对应的字幕
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
 
     return (
       <div className="flex flex-col h-full bg-black relative">
-        {/* 顶部栏 (透明悬浮) */}
-        <header className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center p-4 bg-gradient-to-b from-black/60 to-transparent text-white">
-          <button onClick={() => setCurrentView('dashboard')} className="p-2 rounded-full backdrop-blur-sm bg-black/20">
+        {/* 顶部栏 */}
+        <header className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center p-4 bg-gradient-to-b from-black/80 to-transparent text-white">
+          <button onClick={() => setCurrentView('dashboard')} className="p-2 rounded-full backdrop-blur-sm bg-black/40">
             <ChevronLeft size={20} />
           </button>
           <div className="text-sm font-medium">{formData.title}</div>
-          <button onClick={handleExport} className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-full text-xs font-semibold flex items-center shadow-lg">
+          <button onClick={handleExport} className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-full text-xs font-semibold flex items-center shadow-lg">
             <Download size={14} className="mr-1" /> 导出 SRT
           </button>
         </header>
 
-        {/* 上半部：合成预览区 (16:9 或 自适应) */}
+        {/* 预览区 */}
         <div className="relative w-full h-[45%] bg-gray-900 flex flex-col justify-center overflow-hidden">
-          {/* 背景图 */}
           <img src={formData.bgUrl} alt="Background" className="absolute inset-0 w-full h-full object-cover opacity-60" />
-          
-          {/* 实时字幕叠加 */}
           <div className="relative z-10 w-full px-6 flex flex-col items-center justify-center text-center mt-auto mb-10 min-h-[80px]">
             {activeSubtitle ? (
-              <div className="bg-black/40 backdrop-blur-sm p-3 rounded-xl border border-white/10 w-full max-w-[90%] transform transition-all">
-                <p className="text-white font-bold text-lg mb-1 leading-tight shadow-sm drop-shadow-md">
-                  {activeSubtitle.en}
-                </p>
-                <p className="text-yellow-400 font-medium text-sm drop-shadow-md">
-                  {activeSubtitle.zh}
-                </p>
+              <div className="bg-black/50 backdrop-blur-md p-3 rounded-xl border border-white/10 w-full max-w-[95%] transform transition-all">
+                <p className="text-white font-bold text-lg mb-1 leading-tight drop-shadow-md">{activeSubtitle.en}</p>
+                <p className="text-yellow-400 font-medium text-sm drop-shadow-md">{activeSubtitle.zh}</p>
               </div>
-            ) : (
-              <div className="opacity-0 h-[60px]"></div>
-            )}
+            ) : <div className="h-[60px]"></div>}
           </div>
         </div>
 
-        {/* 播放控制与进度条 */}
+        {/* 播放控制 */}
         <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center space-x-3 text-white">
-           <audio 
-             ref={audioRef} 
-             src={formData.audioUrl} 
-             onTimeUpdate={handleTimeUpdate}
-             onEnded={() => setIsPlaying(false)}
-             className="hidden"
-           />
-           <button 
-             onClick={() => setIsPlaying(!isPlaying)}
-             className="w-10 h-10 rounded-full bg-indigo-600 flex justify-center items-center hover:bg-indigo-500 active:scale-95 transition-transform shrink-0"
-           >
+           <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
+           <button onClick={() => setIsPlaying(!isPlaying)} className="w-10 h-10 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 shrink-0">
              {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
            </button>
            <div className="flex-1 space-y-1">
              <div className="relative w-full h-2 bg-gray-700 rounded-full overflow-hidden">
-               <div 
-                 className="absolute top-0 left-0 h-full bg-indigo-500 rounded-full"
-                 style={{ width: `${(currentTime / (formData.audioDuration || 16)) * 100}%` }}
-               ></div>
+               <div className="absolute top-0 left-0 h-full bg-blue-500 rounded-full" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
              </div>
              <div className="flex justify-between text-[10px] text-gray-400 font-mono">
                <span>{formatTime(currentTime)}</span>
@@ -641,85 +473,43 @@ export default function App() {
            </div>
         </div>
 
-        {/* 下半部：时间轴与字幕编辑器 */}
+        {/* 编辑器 */}
         <div className="flex-1 bg-gray-50 overflow-y-auto pb-6 relative rounded-t-2xl -mt-2 z-10">
           <div className="sticky top-0 bg-gray-50/90 backdrop-blur-md px-4 py-3 border-b border-gray-200 flex justify-between items-center z-10">
             <h3 className="text-sm font-bold text-gray-700 flex items-center">
-              <Edit3 size={16} className="mr-2 text-indigo-500" />
-              调整字幕对齐与翻译
+              <Edit3 size={16} className="mr-2 text-blue-500" />
+              调整字幕内容
             </h3>
             <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">共 {subtitles.length} 句</span>
           </div>
-          
           <div className="p-4 space-y-4">
             {subtitles.map((sub, index) => {
               const isActive = currentTime >= sub.start && currentTime <= sub.end;
               return (
-                <div 
-                  key={sub.id} 
-                  className={`bg-white rounded-xl shadow-sm border transition-all duration-200 overflow-hidden ${
-                    isActive ? 'border-indigo-500 shadow-indigo-100/50 ring-2 ring-indigo-500/20' : 'border-gray-200'
-                  }`}
-                >
-                  {/* 时间控制区 */}
-                  <div className={`px-3 py-2 border-b flex justify-between items-center ${isActive ? 'bg-indigo-50' : 'bg-gray-50'}`}>
+                <div key={sub.id} className={`bg-white rounded-xl shadow-sm border transition-all ${isActive ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-gray-200'}`}>
+                  <div className={`px-3 py-2 border-b flex justify-between items-center ${isActive ? 'bg-blue-50' : 'bg-gray-50'}`}>
                     <div className="flex items-center space-x-2 text-xs font-mono text-gray-600">
-                      <Clock size={12} className={isActive ? 'text-indigo-500' : 'text-gray-400'} />
-                      <input 
-                        type="number"
-                        step="0.1"
-                        value={sub.start.toFixed(1)} 
-                        onChange={(e) => {
-                          const newSubs = [...subtitles];
-                          newSubs[index].start = parseFloat(e.target.value) || 0;
-                          setSubtitles(newSubs);
-                        }}
-                        className="w-12 bg-transparent border-b border-gray-300 text-center outline-none focus:border-indigo-500"
-                      />
+                      <Clock size={12} className={isActive ? 'text-blue-500' : 'text-gray-400'} />
+                      <input type="number" step="0.1" value={sub.start.toFixed(1)} 
+                        onChange={(e) => { const n=[...subtitles]; n[index].start=parseFloat(e.target.value)||0; setSubtitles(n); }}
+                        className="w-12 bg-transparent border-b border-gray-300 text-center outline-none focus:border-blue-500" />
                       <span>-</span>
-                      <input 
-                        type="number"
-                        step="0.1"
-                        value={sub.end.toFixed(1)} 
-                        onChange={(e) => {
-                          const newSubs = [...subtitles];
-                          newSubs[index].end = parseFloat(e.target.value) || 0;
-                          setSubtitles(newSubs);
-                        }}
-                        className="w-12 bg-transparent border-b border-gray-300 text-center outline-none focus:border-indigo-500"
-                      />
-                    </div>
-                    <div className="flex space-x-2">
-                       <button className="text-gray-400 hover:text-red-500 p-1"><Trash2 size={14} /></button>
+                      <input type="number" step="0.1" value={sub.end.toFixed(1)} 
+                        onChange={(e) => { const n=[...subtitles]; n[index].end=parseFloat(e.target.value)||0; setSubtitles(n); }}
+                        className="w-12 bg-transparent border-b border-gray-300 text-center outline-none focus:border-blue-500" />
                     </div>
                   </div>
-                  
-                  {/* 文字编辑区 */}
                   <div className="p-3 space-y-2">
                     <div className="relative">
-                      <span className="absolute left-0 top-1 text-[10px] font-bold text-gray-300 uppercase">EN</span>
-                      <textarea 
-                        value={sub.en}
-                        onChange={(e) => {
-                          const newSubs = [...subtitles];
-                          newSubs[index].en = e.target.value;
-                          setSubtitles(newSubs);
-                        }}
-                        className="w-full pl-6 text-sm font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[40px] focus:bg-gray-50 rounded"
-                      />
+                      <span className="absolute left-0 top-1 text-[10px] font-bold text-gray-300">EN</span>
+                      <textarea value={sub.en} onChange={(e) => { const n=[...subtitles]; n[index].en=e.target.value; setSubtitles(n); }}
+                        className="w-full pl-6 text-sm font-medium text-gray-800 bg-transparent outline-none resize-none min-h-[40px]" />
                     </div>
                     <div className="w-full h-px bg-gray-100"></div>
                     <div className="relative">
-                      <span className="absolute left-0 top-1 text-[10px] font-bold text-indigo-200 uppercase">中</span>
-                      <textarea 
-                        value={sub.zh}
-                        onChange={(e) => {
-                          const newSubs = [...subtitles];
-                          newSubs[index].zh = e.target.value;
-                          setSubtitles(newSubs);
-                        }}
-                        className="w-full pl-6 text-sm font-medium text-gray-600 bg-transparent outline-none resize-none leading-relaxed min-h-[40px] focus:bg-indigo-50/50 rounded"
-                      />
+                      <span className="absolute left-0 top-1 text-[10px] font-bold text-blue-200">中</span>
+                      <textarea value={sub.zh} onChange={(e) => { const n=[...subtitles]; n[index].zh=e.target.value; setSubtitles(n); }}
+                        className="w-full pl-6 text-sm font-medium text-gray-600 bg-transparent outline-none resize-none min-h-[40px]" />
                     </div>
                   </div>
                 </div>
@@ -732,18 +522,13 @@ export default function App() {
   };
 
   return (
-    // 模拟移动端竖屏外壳
     <div className="min-h-screen bg-gray-200 flex items-center justify-center p-0 sm:p-4">
       <div className="w-full max-w-[400px] h-[100dvh] sm:h-[800px] bg-white sm:rounded-[2.5rem] shadow-2xl overflow-hidden relative border-[8px] border-gray-900/5">
-        
-        {/* 顶部刘海模拟 (仅在桌面端装饰) */}
         <div className="hidden sm:block absolute top-0 left-1/2 -translate-x-1/2 w-32 h-6 bg-gray-900/5 rounded-b-xl z-50 pointer-events-none"></div>
-
         {currentView === 'dashboard' && renderDashboard()}
         {currentView === 'upload' && renderUpload()}
         {currentView === 'processing' && renderProcessing()}
         {currentView === 'editor' && renderEditor()}
-        
       </div>
     </div>
   );
