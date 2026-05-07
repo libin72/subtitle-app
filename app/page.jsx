@@ -25,8 +25,9 @@ export default function App() {
   // 视图状态: 'dashboard', 'upload', 'processing', 'editor'
   const [currentView, setCurrentView] = useState('dashboard');
   
-  // API Key 状态，安全地保存在本地
+  // API Key 和模型选择状态
   const [apiKey, setApiKey] = useState('');
+  const [aiModel, setAiModel] = useState('gemini-1.5-flash-latest'); // 添加模型选择状态
 
   // 初始化时从本地读取 API Key
   useEffect(() => {
@@ -93,8 +94,8 @@ export default function App() {
              throw new Error("请先在上传页面上方填入有效的 Gemini API Key！");
           }
 
-          // 已将模型更改为公共可用的稳定版本 gemini-1.5-flash
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`; 
+          // 动态使用用户选择的模型
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${aiModel}:generateContent?key=${apiKey}`; 
           
           const prompt = `I am providing an audio file and its English transcript. 
           Transcript: ${formData.rawText}
@@ -174,7 +175,7 @@ export default function App() {
 
       processVideo();
     }
-  }, [currentView, formData, apiKey]);
+  }, [currentView, formData, apiKey, aiModel]);
 
   // 真实的播放器控制
   useEffect(() => {
@@ -284,8 +285,8 @@ export default function App() {
       </header>
 
       <main className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
-        {/* API Key 安全配置区 */}
-        <div className="space-y-2 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
+        {/* API Key 与模型安全配置区 */}
+        <div className="space-y-3 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
           <label className="text-sm font-bold text-indigo-900 flex items-center">
             <Key size={16} className="mr-2 text-indigo-500" />
             系统配置 (仅管理员可见)
@@ -300,8 +301,20 @@ export default function App() {
             }}
             className="w-full bg-white border border-indigo-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none placeholder-gray-400 shadow-sm"
           />
+          <div className="flex items-center space-x-2">
+            <span className="text-xs text-indigo-700 font-medium whitespace-nowrap">AI 模型:</span>
+            <select
+              value={aiModel}
+              onChange={(e) => setAiModel(e.target.value)}
+              className="flex-1 bg-white border border-indigo-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-gray-700 shadow-sm"
+            >
+              <option value="gemini-1.5-flash-latest">Gemini 1.5 Flash (推荐/最快)</option>
+              <option value="gemini-1.5-pro-latest">Gemini 1.5 Pro (对齐更精准)</option>
+              <option value="gemini-2.5-flash-preview-09-2025">Gemini 2.5 Flash 预览版</option>
+            </select>
+          </div>
           <p className="text-[10px] text-indigo-400 mt-1">
-            * 您的密钥仅会被安全地存储在当前浏览器的本地缓存中，不会被 Vercel 或 GitHub 记录。
+            * 您的密钥仅会被安全地存储在当前浏览器的本地缓存中，不会被 Vercel 记录。
           </p>
         </div>
 
