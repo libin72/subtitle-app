@@ -5,8 +5,35 @@ import {
   Upload, FileAudio, FileText, Image as ImageIcon, 
   Play, Pause, Plus, ChevronLeft, Settings, 
   Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, Link as LinkIcon, Mic, MessageSquare,
-  Eye // 新增的预览图标
+  Eye 
 } from 'lucide-react';
+
+// ================= 新增：图片丝滑渐变组件 (用于 Zone A) =================
+const CrossfadeImage = ({ src }) => {
+  const [images, setImages] = useState([src]);
+
+  useEffect(() => {
+    if (src !== images[images.length - 1]) {
+      // 当 src 改变时，将新图片加入数组，触发过渡动画
+      setImages((prev) => [...prev.slice(-1), src]);
+    }
+  }, [src]);
+
+  return (
+    <div className="relative w-full h-full max-w-[280px] sm:max-w-[320px] aspect-square mx-auto rounded-2xl overflow-hidden shadow-2xl bg-gray-900 border border-white/10">
+      {images.map((imgSrc, idx) => (
+        <img
+          key={imgSrc}
+          src={imgSrc}
+          alt="Visual Context"
+          className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ease-in-out ${
+            idx === images.length - 1 ? 'opacity-100' : 'opacity-0'
+          }`}
+        />
+      ))}
+    </div>
+  );
+};
 
 // 模拟初始测试数据
 const MOCK_PROJECTS = [
@@ -16,7 +43,7 @@ const MOCK_PROJECTS = [
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   
-  // ================= API 配置状态 (双通道) =================
+  // ================= API 配置状态 =================
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
@@ -25,7 +52,6 @@ export default function App() {
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
 
-  // 初始化时从本地读取配置
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
@@ -44,8 +70,9 @@ export default function App() {
     audioUrl: '',
     audioDuration: 0,
     rawText: '',
-    bgName: '',
-    bgUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop'
+    // 将背景图改为 Logo 图，用于新闻过渡和开场
+    logoName: '',
+    logoUrl: 'https://images.unsplash.com/photo-1588681664899-f142ff2dc9b1?q=80&w=400&auto=format&fit=crop'
   });
 
   const [subtitles, setSubtitles] = useState([]);
@@ -54,12 +81,10 @@ export default function App() {
   const [processStep, setProcessStep] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   
-  // 新增：提取的播报日期
   const [newsDate, setNewsDate] = useState('');
 
   const audioRef = useRef(null);
 
-  // 获取格式化的今天日期（作为降级使用的后备日期）
   const getFormattedDate = () => {
     const date = new Date();
     return date.toLocaleDateString('zh-CN', { 
@@ -70,7 +95,7 @@ export default function App() {
     });
   };
 
-  // ================= 核心处理逻辑 (Whisper + LLM) =================
+  // ================= 核心处理逻辑 =================
   useEffect(() => {
     if (currentView === 'processing' && !isProcessing) {
       const processVideo = async () => {
@@ -78,7 +103,7 @@ export default function App() {
         try {
           if (!formData.audioFile) throw new Error("缺少音频文件！");
           
-          // --- 第 1 步：调用 Whisper 接口进行高精度对齐 ---
+          // --- 第 1 步：Whisper 对齐 ---
           setProcessStep(1);
           const cleanAudioUrl = audioBaseUrl.trim().replace(/\/+$/, '');
           const whisperUrl = `${cleanAudioUrl}/audio/transcriptions`;
@@ -104,7 +129,7 @@ export default function App() {
           const whisperResult = await whisperRes.json();
           if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
           
-          // === 精确同步与智能拆分逻辑 (严格15词限制) ===
+          // === 精确同步与智能拆分逻辑 (严格15词) ===
           let finalSourceSegments = [];
 
           if (whisperResult.words && whisperResult.words.length > 0) {
@@ -121,10 +146,9 @@ export default function App() {
                   const hasWeakPunctuation = /[,;，；]['"]*$/.test(w.word.trim());
                   const isLastWord = idx === whisperResult.words.length - 1;
                   
-                  // 规则：
-                  // 1. 遇到强标点立刻断句。
-                  // 2. 遇到弱标点且字数超过8个词（避免过度拆分常用短语），进行断句。
-                  // 3. 一旦达到15个单词，无论如何强行断句，确保不超过三行。
+                  // 1. 强标点必断
+                  // 2. 弱标点且超过8个词断（保护基础短语）
+                  // 3. 达到 15 个词强制断句（杜绝超长溢出）
                   if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 8) || wordCount >= 15 || isLastWord) {
                       finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
                       currentSeg = null;
@@ -158,32 +182,32 @@ export default function App() {
               });
           }
 
-          // --- 第 2 步：防漏翻机制 + 提取播报日期 ---
+          // --- 第 2 步：防漏翻 + 提取日期 + 自动分析画面关键词 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
           
           const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
           
-          const translationPrompt = `You are a professional subtitle translator.
+          const translationPrompt = `You are a professional subtitle translator and visual director.
           1. Correct any OCR/speech-recognition typos in the provided English text, referring to the RAW REFERENCE if given.
           2. Translate the corrected English into natural, concise Chinese.
-          3. EXTRACTION: Look for any specific broadcast date mentioned in the text (e.g. "Today is Wednesday, October 11th"). Extract it and translate it into a natural Chinese date (e.g. "10月11日 星期三"). If no date is found, return an empty string "".
-          4. You MUST return a VALID JSON OBJECT with exactly two keys: "extractedDate" and "subtitles".
-          5. You MUST NOT skip any segment. Map each translation exactly to its input "id".
+          3. EXTRACTION: Extract the broadcast date if mentioned (e.g. "Today is Wednesday, October 11th") and translate it to Chinese format (e.g. "10月11日 星期三"). Else, return "".
+          4. VISUAL CONTEXT: Categorize each segment's 'type' as "intro" (welcome/date), "transition" (music/pause between stories), or "news". For "news", provide a 1-3 word English 'keyword' representing the specific topic (e.g., "space rocket", "election", "dog"). For others, leave keyword empty.
+          5. You MUST return a VALID JSON OBJECT. Do NOT skip any segment. Map exactly to "id".
 
-          RAW REFERENCE TEXT:
+          RAW REFERENCE:
           ${formData.rawText ? formData.rawText : "None. Fix obvious grammar typos."}
 
-          INPUT SEGMENTS TO TRANSLATE:
+          INPUT SEGMENTS:
           ${JSON.stringify(inputMapping)}
 
-          REQUIRED JSON OUTPUT FORMAT:
+          REQUIRED JSON FORMAT:
           {
             "extractedDate": "...",
             "subtitles": [
-              { "id": 0, "en": "corrected english...", "zh": "中文翻译..." },
-              { "id": 1, "en": "...", "zh": "..." }
+              { "id": 0, "en": "corrected english...", "zh": "中文翻译...", "type": "intro", "keyword": "" },
+              { "id": 1, "en": "...", "zh": "...", "type": "news", "keyword": "rocket launch" }
             ]
           }`;
 
@@ -223,8 +247,6 @@ export default function App() {
 
           // --- 第 4 步：融合组装 ---
           setProcessStep(4);
-          
-          // 更新提取到的新闻日期，若为空则使用当天的后备日期
           setNewsDate(extractedDateStr || getFormattedDate());
 
           const finalSubtitles = finalSourceSegments.map((seg, i) => {
@@ -234,7 +256,9 @@ export default function App() {
               start: seg.start, 
               end: seg.end, 
               en: matchObj.en || seg.text, 
-              zh: matchObj.zh || "（翻译丢失，请重试）" 
+              zh: matchObj.zh || "（翻译丢失，请重试）",
+              type: matchObj.type || 'news',
+              keyword: matchObj.keyword || 'news event'
             };
           });
 
@@ -257,9 +281,8 @@ export default function App() {
     }
   }, [currentView, isProcessing]);
 
-  // ================= 播放器与拖动同步 =================
+  // ================= 播放器控制 =================
   useEffect(() => {
-    // 监听播放状态，控制全局音频
     if ((currentView === 'editor' || currentView === 'preview') && audioRef.current) {
       if (isPlaying) {
         audioRef.current.play();
@@ -370,17 +393,15 @@ export default function App() {
       </header>
 
       <main className="flex-1 overflow-y-auto p-5 space-y-6 pb-24">
-        {/* ================= 双通道 API 配置区 ================= */}
+        {/* API 配置区 */}
         <div className="space-y-4">
-          
-          {/* 通道1: Whisper */}
           <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 space-y-2">
             <label className="text-sm font-bold text-blue-900 flex items-center mb-3">
               <Mic size={16} className="mr-2 text-blue-500" />
               1. 语音对齐接口 (WhisperX 兼容)
             </label>
             <input 
-              type="text" placeholder="Base URL (例: https://api.groq.com/openai/v1)" value={audioBaseUrl}
+              type="text" placeholder="Base URL" value={audioBaseUrl}
               onChange={(e) => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }}
               className="w-full bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
             />
@@ -391,21 +412,20 @@ export default function App() {
                 className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
               />
               <input 
-                type="text" placeholder="模型 (如: whisper-large-v3)" value={audioModel}
+                type="text" placeholder="模型" value={audioModel}
                 onChange={(e) => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model', e.target.value); }}
                 className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
           </div>
 
-          {/* 通道2: LLM */}
           <div className="bg-purple-50/50 p-4 rounded-xl border border-purple-100 space-y-2">
             <label className="text-sm font-bold text-purple-900 flex items-center mb-3">
               <MessageSquare size={16} className="mr-2 text-purple-500" />
               2. 文本校对与翻译接口 (LLM 大语言模型)
             </label>
             <input 
-              type="text" placeholder="Base URL (例: https://api.groq.com/openai/v1)" value={textBaseUrl}
+              type="text" placeholder="Base URL" value={textBaseUrl}
               onChange={(e) => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url', e.target.value); }}
               className="w-full bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
             />
@@ -416,16 +436,15 @@ export default function App() {
                 className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
               />
               <input 
-                type="text" placeholder="模型 (如: llama-3.3-70b-versatile)" value={textModel}
+                type="text" placeholder="模型" value={textModel}
                 onChange={(e) => { setTextModel(e.target.value); localStorage.setItem('wx_text_model', e.target.value); }}
                 className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
               />
             </div>
           </div>
-
         </div>
 
-        {/* 1. 上传音频 */}
+        {/* 1. 音频 */}
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
             <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">1</span>
@@ -460,18 +479,46 @@ export default function App() {
           </div>
         </div>
 
-        {/* 2. 英文原稿 (Prompt) */}
+        {/* 2. 原稿 */}
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
             <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-            参考原稿 (选填，AI 将以此为准纠错并提取日期)
+            参考原稿 (选填，提取日期和纠错)
           </label>
           <textarea 
-            placeholder="如果包含专有名词或特定日期，建议粘贴英文原稿。AI 会将其自动吸附对齐并翻译。"
+            placeholder="如果包含专有名词或特定日期，建议粘贴英文原稿。"
             className="w-full h-20 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500"
             value={formData.rawText}
             onChange={(e) => setFormData({...formData, rawText: e.target.value})}
           />
+        </div>
+
+        {/* 3. Logo/过渡图片设置 */}
+        <div className="space-y-2">
+          <label className="text-sm font-medium text-gray-700 flex items-center">
+            <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">3</span>
+            节目 Logo/过渡图片 (Zone A)
+          </label>
+          <div className="flex space-x-4 h-24">
+            <div className="w-1/3 rounded-lg overflow-hidden relative border border-gray-200 shadow-sm bg-black flex items-center justify-center">
+               <img src={formData.logoUrl} alt="Logo" className="w-full h-full object-contain" />
+            </div>
+            <div className="w-2/3 border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center bg-white relative cursor-pointer hover:bg-gray-50">
+               <ImageIcon size={24} className="text-gray-400 mb-1" />
+               <span className="text-xs text-gray-500 text-center px-2">点击上传 KidNuz 图片<br/>(用于音乐过渡)</span>
+               <input 
+                 type="file" 
+                 accept="image/*" 
+                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
+                 onChange={(e) => {
+                   const file = e.target.files[0];
+                   if (file) {
+                     setFormData({...formData, logoName: file.name, logoUrl: URL.createObjectURL(file)});
+                   }
+                 }}
+               />
+            </div>
+          </div>
         </div>
       </main>
 
@@ -479,7 +526,7 @@ export default function App() {
         <button 
           onClick={() => {
             if (!formData.audioFile) { alert("请先上传音频文件"); return; }
-            if (!audioKey || !textKey) { alert("请完善上方 Whisper 和翻译大模型的 API 密钥！"); return; }
+            if (!audioKey || !textKey) { alert("请完善上方 API 密钥！"); return; }
             setCurrentView('processing');
           }}
           className="w-full bg-gray-900 text-white rounded-xl py-3.5 font-semibold text-sm hover:bg-black shadow-md transition-all active:scale-[0.98]"
@@ -495,7 +542,7 @@ export default function App() {
       "准备处理通道...",
       "1. Whisper(X) 引擎正在精准识别与时间对齐...",
       "2. 提取分段字幕...",
-      "3. 正在呼叫大语言模型进行原稿校对与翻译...",
+      "3. 大模型进行校对、提取日期并自动搜索新闻配图...",
       "完成数据组合装载..."
     ];
 
@@ -526,7 +573,6 @@ export default function App() {
 
     return (
       <div className="flex flex-col h-full bg-black relative">
-        {/* 顶部栏 */}
         <header className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center p-4 bg-gradient-to-b from-black/80 to-transparent text-white">
           <button onClick={() => setCurrentView('dashboard')} className="p-2 rounded-full backdrop-blur-sm bg-black/40">
             <ChevronLeft size={20} />
@@ -539,7 +585,6 @@ export default function App() {
 
         {/* 预览区 (小视图) */}
         <div className="relative w-full h-[35%] bg-gray-900 flex flex-col justify-center overflow-hidden">
-          <img src={formData.bgUrl} alt="Background" className="absolute inset-0 w-full h-full object-cover opacity-60" />
           <div className="relative z-10 w-full px-6 flex flex-col items-center justify-center text-center mt-auto mb-6 min-h-[80px]">
             {activeSubtitle ? (
               <div className="bg-black/50 backdrop-blur-md p-3 rounded-xl border border-white/10 w-full max-w-[95%] transform transition-all">
@@ -550,7 +595,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* ================= 可拖动进度条与播放控制 ================= */}
         <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center space-x-3 text-white">
            <button onClick={() => setIsPlaying(!isPlaying)} className="w-10 h-10 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 shrink-0">
              {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
@@ -572,7 +616,6 @@ export default function App() {
            </div>
         </div>
 
-        {/* 编辑器列表 */}
         <div className="flex-1 bg-gray-50 overflow-y-auto relative rounded-t-2xl -mt-2 z-10 flex flex-col">
           <div className="sticky top-0 bg-gray-50/90 backdrop-blur-md px-4 py-3 border-b border-gray-200 flex justify-between items-center z-10 shrink-0">
             <h3 className="text-sm font-bold text-gray-700 flex items-center">
@@ -617,7 +660,6 @@ export default function App() {
             })}
           </div>
 
-          {/* 固定在后台编辑器底部的预览按钮 */}
           <div className="bg-white border-t border-gray-200 p-4 shrink-0 z-20 shadow-[0_-4px_10px_-1px_rgba(0,0,0,0.08)]">
             <button 
               onClick={() => setCurrentView('preview')}
@@ -627,41 +669,38 @@ export default function App() {
               查看成品预览 (全屏)
             </button>
           </div>
-
         </div>
       </div>
     );
   };
 
-  // ================= 新增：全屏成品预览视图 (顶部排版 + 自动提取日期) =================
+  // ================= 终极：全屏成品预览视图 (纯黑底色 + A/B区分屏 + AI配图渐变) =================
   const renderPreview = () => {
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
+    
+    // 根据 LLM 的分类，智能决定 Zone A 应该显示什么图片
+    const targetImage = activeSubtitle && activeSubtitle.type === 'news' && activeSubtitle.keyword
+      ? `https://image.pollinations.ai/prompt/${encodeURIComponent(activeSubtitle.keyword + ' news photography')}?width=400&height=400&nologo=true`
+      : formData.logoUrl;
     
     return (
       <div 
         className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer"
         onClick={() => setIsPlaying(!isPlaying)} 
       >
-        {/* 背景图片 */}
-        <img 
-          src={formData.bgUrl} 
-          alt="Background" 
-          className="absolute inset-0 w-full h-full object-cover opacity-80" 
-        />
-        
         {/* 返回按钮 (悬浮在左上角) */}
         <button 
           onClick={(e) => { 
             e.stopPropagation(); 
             setCurrentView('editor'); 
           }} 
-          className="absolute top-6 left-4 z-20 p-2.5 rounded-full bg-black/30 text-white hover:bg-black/60 transition-colors backdrop-blur-md"
+          className="absolute top-6 left-4 z-20 p-2.5 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors backdrop-blur-md"
         >
           <ChevronLeft size={24} />
         </button>
 
-        {/* 顶部标题区 - 保持在最上方 */}
-        <div className="absolute top-12 left-0 right-0 z-10 flex flex-col items-center justify-center text-white px-6 text-center drop-shadow-xl">
+        {/* 顶部标题区 (高度固定) */}
+        <div className="flex-none pt-12 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
           <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight mb-2 font-sans">
             KidNuz
           </h1>
@@ -670,31 +709,40 @@ export default function App() {
           </p>
         </div>
 
-        {/* 字幕显示区 - 改为紧凑的顶部对齐排版，缩小字号 */}
-        <div className="relative z-10 flex-1 flex flex-col items-center justify-start px-6 text-center mt-36 sm:mt-40">
-          {activeSubtitle ? (
-            <div className="space-y-4 w-full max-w-2xl bg-black/40 backdrop-blur-md p-5 rounded-2xl border border-white/10">
-              <p className="text-white font-semibold text-xl sm:text-2xl leading-relaxed drop-shadow-md">
-                {activeSubtitle.en}
-              </p>
-              <p className="text-yellow-400 font-bold text-lg sm:text-xl leading-relaxed drop-shadow-md">
-                {activeSubtitle.zh}
-              </p>
-            </div>
-          ) : null}
+        {/* 屏幕空间一分为二 (A/B 区) */}
+        <div className="flex-1 flex flex-col w-full px-6 pb-8 z-10">
+          
+          {/* Zone A: 智能图片展示区 (上半部) */}
+          <div className="flex-1 flex items-center justify-center min-h-[30vh]">
+             <CrossfadeImage src={targetImage} />
+          </div>
+
+          {/* Zone B: 顶部对齐的字幕区 (下半部) */}
+          <div className="flex-1 flex flex-col items-center justify-start pt-6 overflow-hidden">
+            {activeSubtitle ? (
+              <div className="w-full max-w-2xl bg-white/5 backdrop-blur-md p-5 rounded-2xl border border-white/10">
+                <p className="text-white font-semibold text-xl leading-relaxed drop-shadow-md mb-3 text-center">
+                  {activeSubtitle.en}
+                </p>
+                <p className="text-yellow-400 font-bold text-lg leading-relaxed drop-shadow-md text-center">
+                  {activeSubtitle.zh}
+                </p>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         {/* 播放暂停指示器 */}
         {!isPlaying && (
           <div className="absolute inset-0 z-0 flex items-center justify-center pointer-events-none">
-            <div className="bg-black/40 rounded-full p-6 backdrop-blur-sm">
+            <div className="bg-white/10 rounded-full p-6 backdrop-blur-sm">
               <Play size={64} fill="currentColor" className="text-white opacity-80 ml-2" />
             </div>
           </div>
         )}
 
         {/* 底部进度条 */}
-        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800/50 z-20">
+        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-20">
           <div 
             className="h-full bg-yellow-400/80 transition-all duration-100 ease-linear"
             style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}
