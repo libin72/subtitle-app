@@ -47,13 +47,25 @@ export default function App() {
 
   const audioRef = useRef(null);
 
-  // API Retry Logic (网络请求防抖与重试)
+  // API Retry Logic (网络请求防抖与重试) - 增强了错误捕获
   const fetchWithRetry = async (url, options, retries = 5) => {
     const delays = [1000, 2000, 4000, 8000, 16000];
     for (let i = 0; i < retries; i++) {
       try {
         const res = await fetch(url, options);
-        if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+        if (!res.ok) {
+          // 尝试获取后端的详细错误信息
+          let errMsg = `HTTP 请求失败 (状态码: ${res.status})`;
+          try {
+            const errData = await res.json();
+            if(errData.error) errMsg += ` - ${errData.error}`;
+          } catch(parseErr) {
+            // 如果后端返回的不是 JSON（比如 Vercel 报错页面），则读取文本
+            const errText = await res.text();
+            if(errText) errMsg += `\n详情: ${errText.substring(0, 100)}...`;
+          }
+          throw new Error(errMsg);
+        }
         return await res.json();
       } catch (e) {
         if (i === retries - 1) throw e;
@@ -62,7 +74,7 @@ export default function App() {
     }
   };
 
-  // 真实的AI处理流程与精确时间对齐 (准备连接 Vercel 后端)
+  // 真实的AI处理流程与精确时间对齐 (绕过 Vercel 防火墙，前端直连)
   useEffect(() => {
     if (currentView === 'processing') {
       const processVideo = async () => {
@@ -70,16 +82,48 @@ export default function App() {
           setProcessStep(0);
           setProcessStep(1);
           
-          // 现在的请求目标变成了我们自己的 Vercel 后端 API
-          // 在当前环境预览中调用该路径可能会404，需在部署后生效
-          const url = `/api/process-subtitles`; 
+          // 👉 核心修改 1：请在这里填入您真实的 Google API Key
+          // 因为是您自用的工作台，把 Key 放在这里是最稳妥防 Vercel 拦截的方案
+          const apiKey = "YOUR_API_KEY"; 
           
-          // 我们将原始文本和音频的 base64 编码发给自己的后端
+          if (!apiKey || apiKey === "YOUR_API_KEY") {
+             throw new Error("请在 App.jsx 的 processVideo 函数中填入您的 Gemini API Key！");
+          }
+
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`; 
+          
+          const prompt = `I am providing an audio file and its English transcript. 
+          Transcript: ${formData.rawText}
+
+          Task:
+          1. Segment the transcript into logical subtitle sentences (roughly 5-12 words each).
+          2. Listen to the audio to determine the PRECISE start and end times (in seconds) for each segment.
+          3. Translate each segment into natural Chinese.
+          4. Return ONLY a valid JSON array. Do not output any other text or markdown.`;
+
+          // 直接将原始文本和音频的 base64 编码发给 Google，绕过 Vercel 后端限制
           const payload = {
-            rawText: formData.rawText,
-            audioDuration: formData.audioDuration,
-            audioBase64: formData.audioBase64,
-            audioMimeType: formData.audioMimeType
+            contents: [{ 
+              parts: [
+                { text: prompt },
+                ...(formData.audioBase64 ? [{ inlineData: { mimeType: formData.audioMimeType || "audio/mp3", data: formData.audioBase64 } }] : [])
+              ] 
+            }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    start: { type: "NUMBER" },
+                    end: { type: "NUMBER" },
+                    en: { type: "STRING" },
+                    zh: { type: "STRING" }
+                  }
+                }
+              }
+            }
           };
 
           const data = await fetchWithRetry(url, {
@@ -88,13 +132,16 @@ export default function App() {
             body: JSON.stringify(payload)
           });
 
-          if (!data || !data.segments) {
-             throw new Error("后端未返回有效数据格式");
+          if (!data || !data.candidates || !data.candidates[0]) {
+             throw new Error("Google AI 返回了异常的数据结构。");
           }
 
           setProcessStep(2);
-          // 后端处理完毕后，直接返回解析好的 JSON 数组
-          const segments = data.segments; 
+          
+          // 解析 Google 直接返回的数据
+          const segmentsText = data.candidates[0].content.parts[0].text;
+          const segments = JSON.parse(segmentsText);
+          
           setProcessStep(3);
           
           // 使用大模型听取音频后返回的精确时间
@@ -116,9 +163,9 @@ export default function App() {
           }, 1000);
 
         } catch (error) {
-          console.error("处理失败:", error);
-          // 简单的错误提示反馈
-          alert("处理失败，请检查网络或后端配置。错误详情可查看控制台。");
+          console.error("处理失败详细信息:", error);
+          // 使用更详细的错误提示反馈
+          alert(`处理失败！\n\n【错误详情】:\n${error.message}\n\n👉【排查建议】:\n1. 确保已在 Vercel 设置 GEMINI_API_KEY，并且设置后点击了 "Redeploy" 重新部署。\n2. 检查音频文件是否过大 (Vercel 免费版限制约 4.5MB)。\n3. 前往 Vercel 后台 -> "Logs" 标签页查看后端完整报错。`);
           setCurrentView('upload');
         }
       };
