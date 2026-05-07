@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, FileText, Image as ImageIcon, 
   Play, Pause, Plus, ChevronLeft, Settings, 
-  Trash2, CheckCircle, Loader2, Download, Edit3, Clock
+  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key
 } from 'lucide-react';
 
 // 模拟初始的测试数据
@@ -25,13 +25,22 @@ export default function App() {
   // 视图状态: 'dashboard', 'upload', 'processing', 'editor'
   const [currentView, setCurrentView] = useState('dashboard');
   
+  // API Key 状态，安全地保存在本地
+  const [apiKey, setApiKey] = useState('');
+
+  // 初始化时从本地读取 API Key
+  useEffect(() => {
+    const storedKey = localStorage.getItem('gemini_api_key');
+    if (storedKey) setApiKey(storedKey);
+  }, []);
+  
   // 上传表单状态
   const [formData, setFormData] = useState({
     title: '新建音频字幕项目',
     audioName: '',
     audioUrl: '',
     audioDuration: 0,
-    audioBase64: '', // 重新启用 Base64
+    audioBase64: '', 
     audioMimeType: '',
     textName: '',
     rawText: '',
@@ -47,20 +56,18 @@ export default function App() {
 
   const audioRef = useRef(null);
 
-  // API Retry Logic (网络请求防抖与重试) - 增强了错误捕获
+  // API Retry Logic (网络请求防抖与重试)
   const fetchWithRetry = async (url, options, retries = 5) => {
     const delays = [1000, 2000, 4000, 8000, 16000];
     for (let i = 0; i < retries; i++) {
       try {
         const res = await fetch(url, options);
         if (!res.ok) {
-          // 尝试获取后端的详细错误信息
           let errMsg = `HTTP 请求失败 (状态码: ${res.status})`;
           try {
             const errData = await res.json();
-            if(errData.error) errMsg += ` - ${errData.error}`;
+            if(errData.error) errMsg += ` - ${errData.error.message || errData.error}`;
           } catch(parseErr) {
-            // 如果后端返回的不是 JSON（比如 Vercel 报错页面），则读取文本
             const errText = await res.text();
             if(errText) errMsg += `\n详情: ${errText.substring(0, 100)}...`;
           }
@@ -74,7 +81,7 @@ export default function App() {
     }
   };
 
-  // 真实的AI处理流程与精确时间对齐 (绕过 Vercel 防火墙，前端直连)
+  // 真实的AI处理流程与精确时间对齐
   useEffect(() => {
     if (currentView === 'processing') {
       const processVideo = async () => {
@@ -82,12 +89,8 @@ export default function App() {
           setProcessStep(0);
           setProcessStep(1);
           
-          // 👉 核心修改 1：请在这里填入您真实的 Google API Key
-          // 因为是您自用的工作台，把 Key 放在这里是最稳妥防 Vercel 拦截的方案
-          const apiKey = "AIzaSyDOmIqYfZ1W5vH8OVmu3IGADC1Zsz5LD5s"; 
-          
-          if (!apiKey || apiKey === "YOUR_API_KEY") {
-             throw new Error("请在代码中找到 apiKey 变量，填入您真实的 Gemini API Key！");
+          if (!apiKey || !apiKey.startsWith("AI")) {
+             throw new Error("请先在上传页面上方填入有效的 Gemini API Key！");
           }
 
           const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`; 
@@ -101,7 +104,7 @@ export default function App() {
           3. Translate each segment into natural Chinese.
           4. Return ONLY a valid JSON array. Do not output any other text or markdown.`;
 
-          // 直接将原始文本和音频的 base64 编码发给 Google，绕过 Vercel 后端限制
+          // 直接将原始文本和音频的 base64 编码发给 Google
           const payload = {
             contents: [{ 
               parts: [
@@ -148,7 +151,6 @@ export default function App() {
           const newSubtitles = segments.map((seg, i) => {
             return { 
               id: i + 1, 
-              // 确保时间是有效数字，处理可能出现的边缘情况
               start: typeof seg.start === 'number' ? seg.start : 0, 
               end: typeof seg.end === 'number' ? seg.end : 0, 
               en: seg.en || "", 
@@ -164,7 +166,6 @@ export default function App() {
 
         } catch (error) {
           console.error("处理失败详细信息:", error);
-          // 使用更详细的错误提示反馈
           alert(`处理失败！\n\n【错误详情】:\n${error.message}`);
           setCurrentView('upload');
         }
@@ -172,7 +173,7 @@ export default function App() {
 
       processVideo();
     }
-  }, [currentView, formData]);
+  }, [currentView, formData, apiKey]);
 
   // 真实的播放器控制
   useEffect(() => {
@@ -219,7 +220,6 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  // 工具函数：格式化时间
   const formatTime = (seconds) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
@@ -234,8 +234,7 @@ export default function App() {
       <header className="bg-white shadow-sm px-6 py-5 flex justify-between items-center">
         <div>
           <h1 className="text-xl font-bold text-gray-800">控制台</h1>
-          {/* 添加版本标识帮助排查缓存 */}
-          <p className="text-xs text-gray-500 mt-1">管理员专属合成工具 <span className="text-indigo-500 font-bold ml-1">(直连版 v2)</span></p>
+          <p className="text-xs text-gray-500 mt-1">管理员专属合成工具 <span className="text-indigo-500 font-bold ml-1">(安全直连版)</span></p>
         </div>
         <button className="p-2 rounded-full hover:bg-gray-100">
           <Settings size={20} className="text-gray-600" />
@@ -284,6 +283,27 @@ export default function App() {
       </header>
 
       <main className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
+        {/* API Key 安全配置区 */}
+        <div className="space-y-2 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
+          <label className="text-sm font-bold text-indigo-900 flex items-center">
+            <Key size={16} className="mr-2 text-indigo-500" />
+            系统配置 (仅管理员可见)
+          </label>
+          <input 
+            type="password" 
+            placeholder="请输入您的 Gemini API Key (AIzaSy...)"
+            value={apiKey}
+            onChange={(e) => {
+              setApiKey(e.target.value);
+              localStorage.setItem('gemini_api_key', e.target.value);
+            }}
+            className="w-full bg-white border border-indigo-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none placeholder-gray-400 shadow-sm"
+          />
+          <p className="text-[10px] text-indigo-400 mt-1">
+            * 您的密钥仅会被安全地存储在当前浏览器的本地缓存中，不会被 Vercel 或 GitHub 记录。
+          </p>
+        </div>
+
         {/* 项目名称 */}
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700">项目名称</label>
@@ -327,7 +347,6 @@ export default function App() {
                     setFormData(prev => ({...prev, audioName: file.name, audioUrl: url, audioDuration: tempAudio.duration}));
                   };
                   
-                  // 重新启用：将音频文件读取为 Base64 以供后端发送给 AI
                   const reader = new FileReader();
                   reader.onload = (event) => {
                     const base64String = event.target.result.split(',')[1];
@@ -416,8 +435,12 @@ export default function App() {
         <button 
           onClick={() => {
             if (!formData.audioUrl || !formData.rawText) {
-              if (!formData.audioUrl) console.warn("需要上传音频");
+              if (!formData.audioUrl) alert("请先上传音频文件");
               return; 
+            }
+            if (!apiKey) {
+              alert("请在页面上方填入您的 Gemini API Key");
+              return;
             }
             setCurrentView('processing');
           }}
