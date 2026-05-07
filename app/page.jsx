@@ -75,6 +75,8 @@ export default function App() {
           audioData.append('model', audioModel.trim());
           audioData.append('response_format', 'verbose_json'); // 强制要求返回带时间的分段数据
           audioData.append('timestamp_granularities[]', 'segment'); 
+          audioData.append('timestamp_granularities[]', 'word'); // 新增：额外请求单词级时间戳用于精准切分
+          
           // 将原稿作为提示词传入，提高专有名词识别准确率。部分接口限制 896 字符以内，此处截取前 800 字符。
           if (formData.rawText) audioData.append('prompt', formData.rawText.substring(0, 800));
 
@@ -92,14 +94,69 @@ export default function App() {
           const whisperResult = await whisperRes.json();
           if (!whisperResult.segments) throw new Error("语音接口未返回分段(segments)时间轴数据，请检查所用模型是否支持 verbose_json。");
           
+          // === 新增：智能长句拆分逻辑 ===
+          let finalSourceSegments = [];
+          const MAX_WORDS = 10; // 限制每句话最大的单词数，大概率保证英文不超过2行
+
+          if (whisperResult.words && whisperResult.words.length > 0) {
+              // 方案 A：如果有单词级时间戳，进行高精度重组
+              let currentSeg = null;
+              whisperResult.words.forEach((w, idx) => {
+                  if (!currentSeg) currentSeg = { start: w.start, end: w.end, text: "" };
+                  currentSeg.text += (currentSeg.text ? " " : "") + w.word.trim();
+                  currentSeg.end = w.end;
+                  
+                  const wordCount = currentSeg.text.split(/\s+/).length;
+                  const hasPunctuation = /[.,?!;。，？！；]$/.test(w.word.trim());
+                  const isLastWord = idx === whisperResult.words.length - 1;
+                  
+                  // 遇到标点且至少有几个词，或者达到了最大长度限制
+                  if ((hasPunctuation && wordCount >= 3) || wordCount >= MAX_WORDS || isLastWord) {
+                      finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
+                      currentSeg = null;
+                  }
+              });
+          } else {
+              // 方案 B：降级方案（某些接口不返回 words），按时间长度比例估算切割
+              whisperResult.segments.forEach(seg => {
+                  const words = seg.text.trim().split(/\s+/);
+                  if (words.length <= MAX_WORDS) {
+                      finalSourceSegments.push({ start: seg.start, end: seg.end, text: seg.text.trim() });
+                      return;
+                  }
+                  
+                  let chunks = [];
+                  let currentChunk = [];
+                  words.forEach((w, idx) => {
+                      currentChunk.push(w);
+                      const hasPunct = /[.,?!;。，？！；]$/.test(w);
+                      if ((hasPunct && currentChunk.length >= 3) || currentChunk.length >= MAX_WORDS || idx === words.length - 1) {
+                          chunks.push(currentChunk.join(" "));
+                          currentChunk = [];
+                      }
+                  });
+
+                  const totalChars = chunks.reduce((acc, text) => acc + text.length, 0);
+                  const duration = seg.end - seg.start;
+                  let currentTime = seg.start;
+
+                  chunks.forEach(chunkText => {
+                      const chunkDuration = (chunkText.length / totalChars) * duration;
+                      finalSourceSegments.push({ start: currentTime, end: currentTime + chunkDuration, text: chunkText });
+                      currentTime += chunkDuration;
+                  });
+              });
+          }
+
           // --- 第 2 步：提取英文文本并调用大模型进行批量翻译 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
           
-          const englishTexts = whisperResult.segments.map(s => s.text.trim());
-          const translationPrompt = `You are a subtitle translator. Translate the following English subtitle segments into natural Chinese. 
-          Return ONLY a valid JSON array of strings, with exact same length and order. Do not include markdown formatting or extra text.
+          const englishTexts = finalSourceSegments.map(s => s.text);
+          const translationPrompt = `You are a professional subtitle translator. Translate the following English subtitle segments into natural Chinese. 
+          Keep translations concise to fit on screen.
+          Return ONLY a valid JSON array of strings, with exact same length (${englishTexts.length}) and order. Do not include markdown formatting or extra text.
           
           Segments to translate:
           ${JSON.stringify(englishTexts)}`;
@@ -143,12 +200,12 @@ export default function App() {
 
           // --- 第 4 步：融合组装最终字幕数据 ---
           setProcessStep(4);
-          const finalSubtitles = whisperResult.segments.map((seg, i) => {
+          const finalSubtitles = finalSourceSegments.map((seg, i) => {
             return { 
               id: i + 1, 
               start: seg.start, 
               end: seg.end, 
-              en: seg.text.trim(), 
+              en: seg.text, 
               zh: translatedTexts[i] || "" // 匹配对应的中文
             };
           });
