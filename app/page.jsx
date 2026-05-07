@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, FileText, Image as ImageIcon, 
   Play, Pause, Plus, ChevronLeft, Settings, 
-  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key
+  Trash2, CheckCircle, Loader2, Download, Edit3, Clock, Key, RefreshCw
 } from 'lucide-react';
 
 // 模拟初始的测试数据
@@ -27,7 +27,14 @@ export default function App() {
   
   // API Key 和模型选择状态
   const [apiKey, setApiKey] = useState('');
-  const [aiModel, setAiModel] = useState('gemini-1.5-flash-latest'); // 添加模型选择状态
+  const [aiModel, setAiModel] = useState('gemini-1.5-flash'); 
+  const [availableModels, setAvailableModels] = useState([
+    'gemini-1.5-flash', 
+    'gemini-1.5-pro', 
+    'gemini-2.0-flash', 
+    'gemini-pro'
+  ]);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
 
   // 初始化时从本地读取 API Key
   useEffect(() => {
@@ -56,6 +63,45 @@ export default function App() {
   const [processStep, setProcessStep] = useState(0);
 
   const audioRef = useRef(null);
+
+  // 动态获取可用模型列表
+  const handleFetchModels = async () => {
+    if (!apiKey) {
+      alert("请先在上方输入您的 Gemini API Key！");
+      return;
+    }
+    setIsFetchingModels(true);
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error?.message || `HTTP 错误 ${res.status}`);
+      }
+      const data = await res.json();
+      
+      // 过滤出支持 generateContent 方法的模型，并去除 "models/" 前缀
+      if (data.models) {
+        const validModels = data.models
+          .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes("generateContent"))
+          .map(m => m.name.replace('models/', ''));
+        
+        if (validModels.length > 0) {
+          setAvailableModels(validModels);
+          // 如果当前选中的模型不在新列表中，自动选中第一个
+          if (!validModels.includes(aiModel)) {
+            setAiModel(validModels[0]);
+          }
+          alert(`成功！已从 Google 获取到 ${validModels.length} 个您的 Key 可用的模型，下拉框已更新。`);
+        } else {
+          alert("未找到支持文本生成的模型权限。");
+        }
+      }
+    } catch (error) {
+      alert(`获取模型列表失败: ${error.message}`);
+    } finally {
+      setIsFetchingModels(false);
+    }
+  };
 
   // API Retry Logic (网络请求防抖与重试)
   const fetchWithRetry = async (url, options, retries = 5) => {
@@ -285,7 +331,7 @@ export default function App() {
       </header>
 
       <main className="flex-1 overflow-y-auto p-6 space-y-6 pb-24">
-        {/* API Key 与模型安全配置区 */}
+        {/* API Key 与模型动态获取配置区 */}
         <div className="space-y-3 bg-indigo-50/50 p-4 rounded-xl border border-indigo-100">
           <label className="text-sm font-bold text-indigo-900 flex items-center">
             <Key size={16} className="mr-2 text-indigo-500" />
@@ -308,13 +354,21 @@ export default function App() {
               onChange={(e) => setAiModel(e.target.value)}
               className="flex-1 bg-white border border-indigo-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-gray-700 shadow-sm"
             >
-              <option value="gemini-1.5-flash-latest">Gemini 1.5 Flash (推荐/最快)</option>
-              <option value="gemini-1.5-pro-latest">Gemini 1.5 Pro (对齐更精准)</option>
-              <option value="gemini-2.5-flash-preview-09-2025">Gemini 2.5 Flash 预览版</option>
+              {availableModels.map(model => (
+                <option key={model} value={model}>{model}</option>
+              ))}
             </select>
+            <button
+              onClick={handleFetchModels}
+              disabled={isFetchingModels || !apiKey}
+              className="flex items-center justify-center bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg text-xs font-semibold hover:bg-indigo-200 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw size={14} className={`mr-1 ${isFetchingModels ? 'animate-spin' : ''}`} />
+              {isFetchingModels ? '获取中' : '刷新列表'}
+            </button>
           </div>
           <p className="text-[10px] text-indigo-400 mt-1">
-            * 您的密钥仅会被安全地存储在当前浏览器的本地缓存中，不会被 Vercel 记录。
+            * 填入 Key 后点击“刷新列表”，即可拉取并使用您账号专属的最新大模型。
           </p>
         </div>
 
