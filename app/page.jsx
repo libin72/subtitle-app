@@ -17,14 +17,14 @@ export default function App() {
   
   // ================= API 配置状态 (双通道) =================
   // 1. 语音/对齐 API (WhisperX / OpenAI 标准)
-  const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.openai.com/v1');
+  const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
-  const [audioModel, setAudioModel] = useState('whisper-1');
+  const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
   // 2. 翻译 API (大语言模型 LLM)
-  const [textBaseUrl, setTextBaseUrl] = useState('https://api.openai.com/v1');
+  const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('gpt-3.5-turbo');
+  const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
 
   // 初始化时从本地读取配置
   useEffect(() => {
@@ -75,10 +75,10 @@ export default function App() {
           audioData.append('model', audioModel.trim());
           audioData.append('response_format', 'verbose_json'); // 强制要求返回带时间的分段数据
           audioData.append('timestamp_granularities[]', 'segment'); 
-          audioData.append('timestamp_granularities[]', 'word'); // 新增：额外请求单词级时间戳用于精准切分
+          audioData.append('timestamp_granularities[]', 'word'); // 额外请求单词级时间戳用于精准切分
           
-          // 将原稿作为提示词传入，提高专有名词识别准确率。部分接口限制 896 字符以内，此处截取前 800 字符。
-          if (formData.rawText) audioData.append('prompt', formData.rawText.substring(0, 800));
+          // 注意：此处移除了将 rawText 传给 prompt 的逻辑，以防 Whisper 产生幻觉直接输出全文。
+          // 文本校对纠错将在下一步由大语言模型处理。
 
           const whisperRes = await fetch(whisperUrl, {
             method: 'POST',
@@ -94,9 +94,8 @@ export default function App() {
           const whisperResult = await whisperRes.json();
           if (!whisperResult.segments) throw new Error("语音接口未返回分段(segments)时间轴数据，请检查所用模型是否支持 verbose_json。");
           
-          // === 新增：智能长句拆分逻辑 ===
+          // === 新增：全新标点长句智能拆分逻辑 ===
           let finalSourceSegments = [];
-          const MAX_WORDS = 10; // 限制每句话最大的单词数，大概率保证英文不超过2行
 
           if (whisperResult.words && whisperResult.words.length > 0) {
               // 方案 A：如果有单词级时间戳，进行高精度重组
@@ -107,11 +106,13 @@ export default function App() {
                   currentSeg.end = w.end;
                   
                   const wordCount = currentSeg.text.split(/\s+/).length;
-                  const hasPunctuation = /[.,?!;。，？！；]$/.test(w.word.trim());
+                  // 强标点：句号、问号、感叹号 (强制断句)
+                  const hasStrongPunctuation = /[.?!。？！]['"]*$/.test(w.word.trim());
+                  // 弱标点：逗号、分号 (字数超过20时断句)
+                  const hasWeakPunctuation = /[,;，；]['"]*$/.test(w.word.trim());
                   const isLastWord = idx === whisperResult.words.length - 1;
                   
-                  // 遇到标点且至少有几个词，或者达到了最大长度限制
-                  if ((hasPunctuation && wordCount >= 3) || wordCount >= MAX_WORDS || isLastWord) {
+                  if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 20) || isLastWord) {
                       finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
                       currentSeg = null;
                   }
@@ -120,17 +121,16 @@ export default function App() {
               // 方案 B：降级方案（某些接口不返回 words），按时间长度比例估算切割
               whisperResult.segments.forEach(seg => {
                   const words = seg.text.trim().split(/\s+/);
-                  if (words.length <= MAX_WORDS) {
-                      finalSourceSegments.push({ start: seg.start, end: seg.end, text: seg.text.trim() });
-                      return;
-                  }
-                  
                   let chunks = [];
                   let currentChunk = [];
+                  
                   words.forEach((w, idx) => {
                       currentChunk.push(w);
-                      const hasPunct = /[.,?!;。，？！；]$/.test(w);
-                      if ((hasPunct && currentChunk.length >= 3) || currentChunk.length >= MAX_WORDS || idx === words.length - 1) {
+                      const wordCount = currentChunk.length;
+                      const hasStrongPunctuation = /[.?!。？！]['"]*$/.test(w);
+                      const hasWeakPunctuation = /[,;，；]['"]*$/.test(w);
+                      
+                      if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 20) || idx === words.length - 1) {
                           chunks.push(currentChunk.join(" "));
                           currentChunk = [];
                       }
@@ -141,24 +141,34 @@ export default function App() {
                   let currentTime = seg.start;
 
                   chunks.forEach(chunkText => {
-                      const chunkDuration = (chunkText.length / totalChars) * duration;
+                      const chunkDuration = totalChars > 0 ? (chunkText.length / totalChars) * duration : 0;
                       finalSourceSegments.push({ start: currentTime, end: currentTime + chunkDuration, text: chunkText });
                       currentTime += chunkDuration;
                   });
               });
           }
 
-          // --- 第 2 步：提取英文文本并调用大模型进行批量翻译 ---
+          // --- 第 2 步：调用大模型进行「参照原文纠错」与「双语翻译」 ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
           
           const englishTexts = finalSourceSegments.map(s => s.text);
-          const translationPrompt = `You are a professional subtitle translator. Translate the following English subtitle segments into natural Chinese. 
-          Keep translations concise to fit on screen.
-          Return ONLY a valid JSON array of strings, with exact same length (${englishTexts.length}) and order. Do not include markdown formatting or extra text.
+          const translationPrompt = `You are a professional subtitle editor and translator.
+          1. I will provide a list of Whisper-recognized subtitle segments. These segments may contain recognition errors.
+          2. I will also provide the CORRECT raw reference text (if available). You MUST use this raw reference text as the ground truth to fix any incorrect words in the Whisper segments.
+          3. Translate each corrected English segment into natural Chinese.
+          4. Return ONLY a valid JSON array of objects, with EXACTLY the same length (${englishTexts.length}) and order as the input segments. Do not include markdown formatting or extra text.
           
-          Segments to translate:
+          JSON Array Format strictly like this:
+          [
+            {"en": "Corrected English subtitle", "zh": "Chinese translation"}
+          ]
+          
+          CORRECT Raw Reference Text:
+          ${formData.rawText ? formData.rawText : "Not provided. Just fix obvious typos and translate."}
+          
+          Whisper Segments to fix and translate:
           ${JSON.stringify(englishTexts)}`;
 
           const llmRes = await fetch(chatUrl, {
@@ -170,13 +180,13 @@ export default function App() {
             body: JSON.stringify({
               model: textModel.trim(),
               messages: [{ role: 'user', content: translationPrompt }],
-              temperature: 0.3
+              temperature: 0.2
             })
           });
 
           if (!llmRes.ok) {
             const err = await llmRes.json().catch(()=>({}));
-            throw new Error(`LLM 翻译失败: ${err.error?.message || llmRes.status}`);
+            throw new Error(`LLM 翻译与纠错失败: ${err.error?.message || llmRes.status}`);
           }
 
           setProcessStep(3);
@@ -184,29 +194,27 @@ export default function App() {
           const responseText = llmResult.choices[0].message.content;
           
           // 健壮的 JSON 解析提取
-          let translatedTexts = [];
+          let translatedData = [];
           try {
              const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-             if (jsonMatch) {
-               translatedTexts = JSON.parse(jsonMatch[0]);
-             } else {
-               translatedTexts = JSON.parse(responseText);
-             }
+             const jsonStr = jsonMatch ? jsonMatch[0] : responseText;
+             translatedData = JSON.parse(jsonStr);
           } catch (e) {
              console.warn("解析大模型 JSON 返回失败，尝试降级处理:", responseText);
-             // 如果解析失败，则按换行符强行分割
-             translatedTexts = responseText.split('\n').filter(t => t.trim().length > 0);
+             // 如果解析失败，尝试备用容错
+             translatedData = englishTexts.map(t => ({ en: t, zh: "翻译解析失败" }));
           }
 
           // --- 第 4 步：融合组装最终字幕数据 ---
           setProcessStep(4);
           const finalSubtitles = finalSourceSegments.map((seg, i) => {
+            const data = translatedData[i] || {};
             return { 
               id: i + 1, 
               start: seg.start, 
               end: seg.end, 
-              en: seg.text, 
-              zh: translatedTexts[i] || "" // 匹配对应的中文
+              en: data.en || seg.text, // 优先使用大模型根据原文纠错后的英文
+              zh: data.zh || ""        // 使用翻译的中文
             };
           });
 
@@ -343,7 +351,7 @@ export default function App() {
               1. 语音对齐接口 (WhisperX 兼容)
             </label>
             <input 
-              type="text" placeholder="Base URL (例: https://api.openai.com/v1)" value={audioBaseUrl}
+              type="text" placeholder="Base URL (例: https://api.groq.com/openai/v1)" value={audioBaseUrl}
               onChange={(e) => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }}
               className="w-full bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
             />
@@ -354,7 +362,7 @@ export default function App() {
                 className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
               />
               <input 
-                type="text" placeholder="模型 (如: whisper-1)" value={audioModel}
+                type="text" placeholder="模型 (如: whisper-large-v3)" value={audioModel}
                 onChange={(e) => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model', e.target.value); }}
                 className="w-1/2 bg-white border border-blue-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
               />
@@ -365,10 +373,10 @@ export default function App() {
           <div className="bg-purple-50/50 p-4 rounded-xl border border-purple-100 space-y-2">
             <label className="text-sm font-bold text-purple-900 flex items-center mb-3">
               <MessageSquare size={16} className="mr-2 text-purple-500" />
-              2. 文本翻译接口 (LLM 大语言模型)
+              2. 文本校对与翻译接口 (LLM 大语言模型)
             </label>
             <input 
-              type="text" placeholder="Base URL (例: https://api.openai.com/v1)" value={textBaseUrl}
+              type="text" placeholder="Base URL (例: https://api.groq.com/openai/v1)" value={textBaseUrl}
               onChange={(e) => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url', e.target.value); }}
               className="w-full bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
             />
@@ -379,7 +387,7 @@ export default function App() {
                 className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
               />
               <input 
-                type="text" placeholder="模型 (如: gpt-3.5-turbo)" value={textModel}
+                type="text" placeholder="模型 (如: llama-3.3-70b-versatile)" value={textModel}
                 onChange={(e) => { setTextModel(e.target.value); localStorage.setItem('wx_text_model', e.target.value); }}
                 className="w-1/2 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-purple-500 outline-none"
               />
@@ -427,10 +435,10 @@ export default function App() {
         <div className="space-y-2">
           <label className="text-sm font-medium text-gray-700 flex items-center">
             <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-            参考原稿 (选填)
+            参考原稿 (选填，AI 将以此为准纠错)
           </label>
           <textarea 
-            placeholder="如果包含专有名词，建议粘贴英文原稿。WhisperX 将自动对齐..."
+            placeholder="如果包含专有名词，建议粘贴英文原稿。AI 会将音频时间轴自动吸附并对齐至原稿。"
             className="w-full h-20 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500"
             value={formData.rawText}
             onChange={(e) => setFormData({...formData, rawText: e.target.value})}
@@ -458,7 +466,7 @@ export default function App() {
       "准备处理通道...",
       "1. Whisper(X) 引擎正在精准识别与时间对齐...",
       "2. 提取分段字幕...",
-      "3. 正在呼叫大语言模型进行批量翻译...",
+      "3. 正在呼叫大语言模型进行原稿校对与翻译...",
       "完成数据组合装载..."
     ];
 
