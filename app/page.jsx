@@ -16,12 +16,10 @@ export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   
   // ================= API 配置状态 (双通道) =================
-  // 1. 语音/对齐 API (WhisperX / OpenAI 标准)
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 2. 翻译 API (大语言模型 LLM)
   const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
@@ -40,7 +38,7 @@ export default function App() {
   // ================= 业务状态 =================
   const [formData, setFormData] = useState({
     title: '新建音频字幕项目',
-    audioFile: null, // 直接保存 File 对象，解决大文件 Base64 限制
+    audioFile: null, 
     audioName: '',
     audioUrl: '',
     audioDuration: 0,
@@ -65,7 +63,7 @@ export default function App() {
         try {
           if (!formData.audioFile) throw new Error("缺少音频文件！");
           
-          // --- 第 1 步：调用 Whisper(X) 接口进行听写与毫秒级时间轴对齐 ---
+          // --- 第 1 步：调用 Whisper 接口进行高精度对齐 ---
           setProcessStep(1);
           const cleanAudioUrl = audioBaseUrl.trim().replace(/\/+$/, '');
           const whisperUrl = `${cleanAudioUrl}/audio/transcriptions`;
@@ -73,13 +71,10 @@ export default function App() {
           const audioData = new FormData();
           audioData.append('file', formData.audioFile);
           audioData.append('model', audioModel.trim());
-          audioData.append('response_format', 'verbose_json'); // 强制要求返回带时间的分段数据
+          audioData.append('response_format', 'verbose_json'); 
           audioData.append('timestamp_granularities[]', 'segment'); 
-          audioData.append('timestamp_granularities[]', 'word'); // 额外请求单词级时间戳用于精准切分
+          audioData.append('timestamp_granularities[]', 'word'); // 强制请求词级时间戳，解决不同步核心
           
-          // 注意：此处移除了将 rawText 传给 prompt 的逻辑，以防 Whisper 产生幻觉直接输出全文。
-          // 文本校对纠错将在下一步由大语言模型处理。
-
           const whisperRes = await fetch(whisperUrl, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${audioKey}` },
@@ -88,37 +83,38 @@ export default function App() {
 
           if (!whisperRes.ok) {
             const err = await whisperRes.json().catch(()=>({}));
-            throw new Error(`Whisper 语音识别失败: ${err.error?.message || whisperRes.status}`);
+            throw new Error(`Whisper 识别失败: ${err.error?.message || whisperRes.status}`);
           }
           
           const whisperResult = await whisperRes.json();
-          if (!whisperResult.segments) throw new Error("语音接口未返回分段(segments)时间轴数据，请检查所用模型是否支持 verbose_json。");
+          if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
           
-          // === 新增：全新标点长句智能拆分逻辑 ===
+          // === 新增：精确同步与智能拆分逻辑 ===
           let finalSourceSegments = [];
 
           if (whisperResult.words && whisperResult.words.length > 0) {
-              // 方案 A：如果有单词级时间戳，进行高精度重组
               let currentSeg = null;
               whisperResult.words.forEach((w, idx) => {
+                  // 过滤无时间的幻觉单词
+                  if (typeof w.start !== 'number' || typeof w.end !== 'number') return;
+                  
                   if (!currentSeg) currentSeg = { start: w.start, end: w.end, text: "" };
                   currentSeg.text += (currentSeg.text ? " " : "") + w.word.trim();
-                  currentSeg.end = w.end;
+                  currentSeg.end = w.end; // 实时更新结束时间，确保毫秒级同步
                   
                   const wordCount = currentSeg.text.split(/\s+/).length;
-                  // 强标点：句号、问号、感叹号 (强制断句)
                   const hasStrongPunctuation = /[.?!。？！]['"]*$/.test(w.word.trim());
-                  // 弱标点：逗号、分号 (字数超过20时断句)
                   const hasWeakPunctuation = /[,;，；]['"]*$/.test(w.word.trim());
                   const isLastWord = idx === whisperResult.words.length - 1;
                   
-                  if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 20) || isLastWord) {
+                  // 1. 强标点必断； 2. 弱标点超15词断； 3. 防溢出保底(无标点超25词)强制断； 4. 最后一句
+                  if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 15) || wordCount >= 25 || isLastWord) {
                       finalSourceSegments.push({ start: currentSeg.start, end: currentSeg.end, text: currentSeg.text.trim() });
                       currentSeg = null;
                   }
               });
           } else {
-              // 方案 B：降级方案（某些接口不返回 words），按时间长度比例估算切割
+              // 降级兼容：接口不支持 word 时退回 segment 长度估算
               whisperResult.segments.forEach(seg => {
                   const words = seg.text.trim().split(/\s+/);
                   let chunks = [];
@@ -127,10 +123,9 @@ export default function App() {
                   words.forEach((w, idx) => {
                       currentChunk.push(w);
                       const wordCount = currentChunk.length;
-                      const hasStrongPunctuation = /[.?!。？！]['"]*$/.test(w);
-                      const hasWeakPunctuation = /[,;，；]['"]*$/.test(w);
-                      
-                      if (hasStrongPunctuation || (hasWeakPunctuation && wordCount >= 20) || idx === words.length - 1) {
+                      const hasStrong = /[.?!。？！]['"]*$/.test(w);
+                      const hasWeak = /[,;，；]['"]*$/.test(w);
+                      if (hasStrong || (hasWeak && wordCount >= 15) || wordCount >= 25 || idx === words.length - 1) {
                           chunks.push(currentChunk.join(" "));
                           currentChunk = [];
                       }
@@ -139,7 +134,6 @@ export default function App() {
                   const totalChars = chunks.reduce((acc, text) => acc + text.length, 0);
                   const duration = seg.end - seg.start;
                   let currentTime = seg.start;
-
                   chunks.forEach(chunkText => {
                       const chunkDuration = totalChars > 0 ? (chunkText.length / totalChars) * duration : 0;
                       finalSourceSegments.push({ start: currentTime, end: currentTime + chunkDuration, text: chunkText });
@@ -148,28 +142,33 @@ export default function App() {
               });
           }
 
-          // --- 第 2 步：调用大模型进行「参照原文纠错」与「双语翻译」 ---
+          // --- 第 2 步：防漏翻机制 (打标签 ID + 强类型 JSON 返回) ---
           setProcessStep(2);
           const cleanTextUrl = textBaseUrl.trim().replace(/\/+$/, '');
           const chatUrl = `${cleanTextUrl}/chat/completions`;
           
-          const englishTexts = finalSourceSegments.map(s => s.text);
-          const translationPrompt = `You are a professional subtitle editor and translator.
-          1. I will provide a list of Whisper-recognized subtitle segments. These segments may contain recognition errors.
-          2. I will also provide the CORRECT raw reference text (if available). You MUST use this raw reference text as the ground truth to fix any incorrect words in the Whisper segments.
-          3. Translate each corrected English segment into natural Chinese.
-          4. Return ONLY a valid JSON array of objects, with EXACTLY the same length (${englishTexts.length}) and order as the input segments. Do not include markdown formatting or extra text.
+          // 给每句话标上 ID，大模型将无法漏翻
+          const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
           
-          JSON Array Format strictly like this:
-          [
-            {"en": "Corrected English subtitle", "zh": "Chinese translation"}
-          ]
-          
-          CORRECT Raw Reference Text:
-          ${formData.rawText ? formData.rawText : "Not provided. Just fix obvious typos and translate."}
-          
-          Whisper Segments to fix and translate:
-          ${JSON.stringify(englishTexts)}`;
+          const translationPrompt = `You are a professional subtitle translator.
+          1. Correct any OCR/speech-recognition typos in the provided English text, referring to the RAW REFERENCE if given.
+          2. Translate the corrected English into natural, concise Chinese.
+          3. You MUST return a VALID JSON OBJECT containing an array named "subtitles".
+          4. You MUST NOT skip any segment. Map each translation exactly to its input "id".
+
+          RAW REFERENCE TEXT:
+          ${formData.rawText ? formData.rawText : "None. Fix obvious grammar typos."}
+
+          INPUT SEGMENTS TO TRANSLATE:
+          ${JSON.stringify(inputMapping)}
+
+          REQUIRED JSON OUTPUT FORMAT:
+          {
+            "subtitles": [
+              { "id": 0, "en": "corrected english...", "zh": "中文翻译..." },
+              { "id": 1, "en": "...", "zh": "..." }
+            ]
+          }`;
 
           const llmRes = await fetch(chatUrl, {
             method: 'POST',
@@ -180,41 +179,39 @@ export default function App() {
             body: JSON.stringify({
               model: textModel.trim(),
               messages: [{ role: 'user', content: translationPrompt }],
-              temperature: 0.2
+              temperature: 0.1,
+              response_format: { type: "json_object" } // 强行锁死返回结构，杜绝乱码和截断
             })
           });
 
           if (!llmRes.ok) {
             const err = await llmRes.json().catch(()=>({}));
-            throw new Error(`LLM 翻译与纠错失败: ${err.error?.message || llmRes.status}`);
+            throw new Error(`翻译纠错请求失败: ${err.error?.message || llmRes.status}`);
           }
 
           setProcessStep(3);
           const llmResult = await llmRes.json();
           const responseText = llmResult.choices[0].message.content;
           
-          // 健壮的 JSON 解析提取
           let translatedData = [];
           try {
-             const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-             const jsonStr = jsonMatch ? jsonMatch[0] : responseText;
-             translatedData = JSON.parse(jsonStr);
+             const parsed = JSON.parse(responseText);
+             translatedData = parsed.subtitles || [];
           } catch (e) {
-             console.warn("解析大模型 JSON 返回失败，尝试降级处理:", responseText);
-             // 如果解析失败，尝试备用容错
-             translatedData = englishTexts.map(t => ({ en: t, zh: "翻译解析失败" }));
+             console.error("JSON 解析失败:", responseText);
+             throw new Error("大模型未返回合规的 JSON 数据，请重试。");
           }
 
-          // --- 第 4 步：融合组装最终字幕数据 ---
+          // --- 第 4 步：融合组装 (根据 ID 精确绑定，拒绝错位) ---
           setProcessStep(4);
           const finalSubtitles = finalSourceSegments.map((seg, i) => {
-            const data = translatedData[i] || {};
+            const matchObj = translatedData.find(t => t.id === i) || {};
             return { 
               id: i + 1, 
               start: seg.start, 
               end: seg.end, 
-              en: data.en || seg.text, // 优先使用大模型根据原文纠错后的英文
-              zh: data.zh || ""        // 使用翻译的中文
+              en: matchObj.en || seg.text, 
+              zh: matchObj.zh || "（翻译丢失，请检查）" 
             };
           });
 
@@ -237,7 +234,7 @@ export default function App() {
     }
   }, [currentView, isProcessing]);
 
-  // 播放器控制
+  // ================= 播放器与拖动同步 =================
   useEffect(() => {
     if (currentView === 'editor' && audioRef.current) {
       if (isPlaying) {
@@ -251,6 +248,15 @@ export default function App() {
   const handleTimeUpdate = () => {
     if (audioRef.current) {
       setCurrentTime(audioRef.current.currentTime);
+    }
+  };
+
+  // 用户拖动进度条事件
+  const handleSeek = (e) => {
+    const newTime = parseFloat(e.target.value);
+    setCurrentTime(newTime);
+    if (audioRef.current) {
+      audioRef.current.currentTime = newTime;
     }
   };
 
@@ -521,16 +527,25 @@ export default function App() {
           </div>
         </div>
 
-        {/* 播放控制 */}
+        {/* ================= 可拖动进度条与播放控制 ================= */}
         <div className="bg-gray-900 border-b border-gray-800 px-4 py-3 flex items-center space-x-3 text-white">
            <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
            <button onClick={() => setIsPlaying(!isPlaying)} className="w-10 h-10 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 shrink-0">
              {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
            </button>
-           <div className="flex-1 space-y-1">
-             <div className="relative w-full h-2 bg-gray-700 rounded-full overflow-hidden">
-               <div className="absolute top-0 left-0 h-full bg-blue-500 rounded-full" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
-             </div>
+           <div className="flex-1 space-y-2">
+             
+             {/* 核心改动：原生的 input range 滑动条，支持拖拽 */}
+             <input 
+               type="range"
+               min="0"
+               max={formData.audioDuration || 1}
+               step="0.01"
+               value={currentTime}
+               onChange={handleSeek}
+               className="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer accent-blue-500 outline-none"
+             />
+
              <div className="flex justify-between text-[10px] text-gray-400 font-mono">
                <span>{formatTime(currentTime)}</span>
                <span>{formData.audioDuration ? formatTime(formData.audioDuration) : '00:00.0'}</span>
