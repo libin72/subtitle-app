@@ -441,12 +441,10 @@ export default function App() {
   // ================= 终极播放器防护 =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      // 修复核心Bug：移除 sentences.length === 0 的阻断条件，允许在解析前预览音频
-      if (!audioRef.current || isExportingVideo) return;
+      if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
       
-      if (isPlaying) {
+      if (!audioRef.current.paused) {
           audioRef.current.pause();
-          setIsPlaying(false);
       } else {
           if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
               audioRef.current.currentTime = 0;
@@ -455,15 +453,10 @@ export default function App() {
           
           const playPromise = audioRef.current.play();
           if (playPromise !== undefined) {
-              playPromise.then(() => {
-                  setIsPlaying(true);
-              }).catch(err => {
+              playPromise.catch(err => {
                   console.error("播放被拦截:", err);
                   alert("播放被浏览器拦截。请确保您已在网页任意位置点击交互过。");
-                  setIsPlaying(false);
               });
-          } else {
-              setIsPlaying(true);
           }
       }
   };
