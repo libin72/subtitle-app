@@ -92,20 +92,20 @@ export default function App() {
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置 -> 默认切换为 Google Gemini 1.5 Pro (目前最强且有高额免费调用量的模型)
-  const [textBaseUrl, setTextBaseUrl] = useState('https://generativelanguage.googleapis.com/v1beta/openai/');
+  // 文本翻译 API 配置 -> 默认切换为智谱 GLM-4-Flash (国内完全免费、速度快、无需代理)
+  const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('gemini-1.5-pro');
+  const [textModel, setTextModel] = useState('glm-4-flash');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
     
-    // 使用 _v4 后缀绕过旧缓存，强制重置页面上的配置为您最新的免费好用模型
-    if (localStorage.getItem('wx_text_url_v4')) setTextBaseUrl(localStorage.getItem('wx_text_url_v4'));
-    if (localStorage.getItem('wx_text_key_v4')) setTextKey(localStorage.getItem('wx_text_key_v4'));
-    if (localStorage.getItem('wx_text_model_v4')) setTextModel(localStorage.getItem('wx_text_model_v4'));
+    // 使用 _v5 后缀绕过旧缓存，强制重置页面配置为智谱免费版
+    if (localStorage.getItem('wx_text_url_v5')) setTextBaseUrl(localStorage.getItem('wx_text_url_v5'));
+    if (localStorage.getItem('wx_text_key_v5')) setTextKey(localStorage.getItem('wx_text_key_v5'));
+    if (localStorage.getItem('wx_text_model_v5')) setTextModel(localStorage.getItem('wx_text_model_v5'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -293,19 +293,26 @@ export default function App() {
             });
 
             if (!llmRes.ok) {
-                const errorData = await llmRes.json().catch(() => ({}));
-                const errMsg = errorData.error?.message || llmRes.statusText;
+                // 暴力错误提取机制，防止空白报错
+                let errMsg = llmRes.statusText || "未知报错";
+                try {
+                    const errRaw = await llmRes.text();
+                    const errJson = JSON.parse(errRaw);
+                    errMsg = errJson.error?.message || errJson.message || errRaw;
+                } catch (e) {
+                    // 如果连 text 都取不到，保持默认 errMsg
+                }
                 
                 if (llmRes.status === 429) {
                     throw new Error("429");
                 } else if (llmRes.status === 403) {
-                    throw new Error(`403 权限受限: 该模型为付费专属或当前 API Key 无权限访问，请尝试免费模型。`);
+                    throw new Error(`403 权限受限: 该模型为付费专属或无权限访问。原文: ${errMsg}`);
                 } else if (llmRes.status === 404) {
-                    throw new Error(`404 模型未找到: 请检查您的 Model 名称是否拼写正确，或者 Base URL 是否匹配该模型。`);
+                    throw new Error(`404 模型未找到: 请检查您的 Model 或 Base URL。原文: ${errMsg}`);
                 } else if (llmRes.status === 402) {
-                    throw new Error(`402 余额不足: 请检查 API 账号额度`);
+                    throw new Error(`402 余额不足: 请检查 API 账号额度。原文: ${errMsg}`);
                 } else if (llmRes.status === 401) {
-                    throw new Error(`401 鉴权失败: API Key 无效`);
+                    throw new Error(`401 鉴权失败: API Key 无效。原文: ${errMsg}`);
                 } else {
                     throw new Error(`${llmRes.status} 服务器报错: ${errMsg}`);
                 }
@@ -315,7 +322,7 @@ export default function App() {
             const content = llmResult.choices[0].message.content;
             
             const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error("大模型未返回有效的 JSON 结构");
+            if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。原始返回: ${content.substring(0,50)}...`);
             
             const parsed = JSON.parse(jsonMatch[0]);
             const transDict = {};
@@ -340,7 +347,7 @@ export default function App() {
             
             let displayError = e.message;
             if (e.name === "TypeError" && e.message.includes("fetch")) {
-                displayError = "网络断开或跨域拦截，请检查代理";
+                displayError = "网络断开或跨域拦截，请检查网络或关闭全局代理限制";
             }
             
             if (retryCount >= maxRetries - 1) {
@@ -921,10 +928,10 @@ export default function App() {
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v4', e.target.value); }} placeholder="例如: https://generativelanguage.googleapis.com/v1beta/openai/" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v5', e.target.value); }} placeholder="例如: https://open.bigmodel.cn/api/paas/v4" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v4', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v4', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 </div>
               </div>
             </div>
