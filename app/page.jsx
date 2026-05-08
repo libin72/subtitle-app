@@ -33,6 +33,42 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
+// ================= 中文字幕智能动态切片辅助函数 =================
+const splitChineseText = (text) => {
+  if (!text) return [];
+  const chunks = [];
+  let currentChunk = "";
+  for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      currentChunk += char;
+      const remaining = text.length - 1 - i;
+      
+      const isStrong = /[。？！”’\n]/.test(char);
+      const isWeak = /[，；、]/.test(char);
+      const isLast = i === text.length - 1;
+      
+      let shouldSplit = false;
+      if (isLast) {
+          shouldSplit = true;
+      } else if (currentChunk.length >= 30) {
+          // 强制30字硬上限
+          shouldSplit = true;
+      } else if (isStrong && remaining >= 5) {
+          // 强标点断句，确保尾部不残留少于5字的孤儿句
+          shouldSplit = true;
+      } else if (isWeak && currentChunk.length >= 15 && remaining >= 5) {
+          // 弱标点满15字顺势断句
+          shouldSplit = true;
+      }
+      
+      if (shouldSplit) {
+          chunks.push(currentChunk.trim());
+          currentChunk = "";
+      }
+  }
+  return chunks.filter(c => c.length > 0);
+};
+
 export default function App() {
   // API 配置
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
@@ -364,15 +400,37 @@ export default function App() {
     // 智能锚定：找到当前时间点隶属的“整句”和内部“切片”
     let activeSentence = null;
     let activeChunk = null;
+    let activeZhChunkText = "";
     
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
         if (sent.enChunks.length === 0) continue;
         const sentStart = sent.enChunks[0].start;
         const sentEnd = sent.enChunks[sent.enChunks.length - 1].end;
+        
         if (currentTime >= sentStart && currentTime <= sentEnd) {
             activeSentence = sent;
             activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
+            
+            // 实时动态切分并映射当前时间应该显示的中文字幕切片
+            const zhChunksText = splitChineseText(sent.zh);
+            if (zhChunksText.length > 0) {
+                const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
+                const duration = sentEnd - sentStart;
+                let t = sentStart;
+                let found = false;
+                for (let j = 0; j < zhChunksText.length; j++) {
+                    const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
+                    if (currentTime >= t && currentTime <= t + chunkDur) {
+                        activeZhChunkText = zhChunksText[j];
+                        found = true;
+                        break;
+                    }
+                    t += chunkDur;
+                }
+                // 如果恰好踩在边缘，默认显示最后一个中文切片
+                if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
+            }
             break;
         }
     }
@@ -416,10 +474,10 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* 中文独立轨道：以整句为单位停留，保障完整理解 */}
-                <div className="w-full bg-yellow-900/70 backdrop-blur-md p-4 rounded-xl border border-yellow-500/30 transform transition-all duration-300 shadow-lg">
-                  <p className="text-yellow-400 font-bold text-[15px] leading-relaxed text-left">
-                    {activeSentence.zh}
+                {/* 中文独立轨道：按照30汉字限长动态滚动，稍浅的蓝色底色与纯白文字 */}
+                <div className="w-full bg-sky-500/60 backdrop-blur-md p-4 rounded-xl border border-sky-300/40 transform transition-all duration-300 shadow-lg">
+                  <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
+                    {activeZhChunkText || activeSentence.zh}
                   </p>
                 </div>
               </>
@@ -568,12 +626,12 @@ export default function App() {
 
                        return (
                           <div key={sent.id}>
-                            <div className={`rounded-xl border transition-all duration-200 ${isSentenceActive ? 'border-yellow-400 bg-yellow-50/20 shadow-md ring-1 ring-yellow-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                            <div className={`rounded-xl border transition-all duration-200 ${isSentenceActive ? 'border-sky-400 bg-sky-50/20 shadow-md ring-1 ring-sky-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
                               
                               {/* 顶栏：显示整句中文翻译 */}
-                              <div className={`px-4 py-2 border-b flex flex-col rounded-t-xl ${isSentenceActive ? 'bg-yellow-100/40 border-yellow-200' : 'bg-gray-50 border-gray-100'}`}>
+                              <div className={`px-4 py-2 border-b flex flex-col rounded-t-xl ${isSentenceActive ? 'bg-sky-100/40 border-sky-200' : 'bg-gray-50 border-gray-100'}`}>
                                 <div className="flex justify-between items-center mb-1">
-                                    <span className="text-xs font-bold text-gray-500">完整句意翻译 (展示停留)</span>
+                                    <span className="text-xs font-bold text-gray-500">完整句意翻译 (预览时自动切片滚动)</span>
                                 </div>
                                 <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-sm font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[40px]" placeholder="请输入整句翻译..." />
                               </div>
