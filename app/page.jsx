@@ -92,7 +92,7 @@ export default function App() {
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置 -> 默认切换为智谱 GLM-4-Flash (国内完全免费、速度快、无需代理)
+  // 文本翻译 API 配置 -> 默认切换为智谱 GLM-4-Flash
   const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('glm-4-flash');
@@ -102,7 +102,6 @@ export default function App() {
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
     
-    // 使用 _v5 后缀绕过旧缓存，强制重置页面配置为智谱免费版
     if (localStorage.getItem('wx_text_url_v5')) setTextBaseUrl(localStorage.getItem('wx_text_url_v5'));
     if (localStorage.getItem('wx_text_key_v5')) setTextKey(localStorage.getItem('wx_text_key_v5'));
     if (localStorage.getItem('wx_text_model_v5')) setTextModel(localStorage.getItem('wx_text_model_v5'));
@@ -157,6 +156,11 @@ export default function App() {
     setIsProcessing(true);
     setSentences([]);
     setBlocks([]);
+    setIsPlaying(false);
+    if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+    }
     
     try {
       setProcessMsg("1. 正在进行高精度音频识别与对齐...");
@@ -171,9 +175,22 @@ export default function App() {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${audioKey}` },
         body: audioData
+      }).catch(err => {
+          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请检查您的网络连接或代理设置。");
       });
 
-      if (!whisperRes.ok) throw new Error(`Whisper 识别失败: ${whisperRes.status}`);
+      if (!whisperRes.ok) {
+          let errText = whisperRes.statusText;
+          try {
+              const errJson = await whisperRes.json();
+              errText = errJson.error?.message || errText;
+          } catch(e) {}
+          if (whisperRes.status === 503) {
+              throw new Error("503 Service Unavailable: Groq 解析服务器当前崩溃或过载宕机，触发了跨域阻断。建议稍后再试，或更换其他 Whisper API 节点。");
+          }
+          throw new Error(`Whisper 识别失败 (${whisperRes.status}): ${errText}`);
+      }
+      
       const whisperResult = await whisperRes.json();
       
       let allWords = [];
@@ -293,15 +310,12 @@ export default function App() {
             });
 
             if (!llmRes.ok) {
-                // 暴力错误提取机制，防止空白报错
                 let errMsg = llmRes.statusText || "未知报错";
                 try {
                     const errRaw = await llmRes.text();
                     const errJson = JSON.parse(errRaw);
                     errMsg = errJson.error?.message || errJson.message || errRaw;
-                } catch (e) {
-                    // 如果连 text 都取不到，保持默认 errMsg
-                }
+                } catch (e) {}
                 
                 if (llmRes.status === 429) {
                     throw new Error("429");
@@ -425,45 +439,47 @@ export default function App() {
   };
 
   // ================= 播放器与辅助功能 =================
-  // 恢复状态守护：确保 UI 的播放状态和底层的音频流绝对同步
-  useEffect(() => {
-    if (audioRef.current && !isExportingVideo) {
-      if (isPlaying) {
-        const p = audioRef.current.play();
-        if (p !== undefined) p.catch(() => {}); 
-      } else {
-        audioRef.current.pause();
-      }
-    }
-  }, [isPlaying, isExportingVideo]);
-
+  // 彻底移除 useEffect 中的异步 play()，改用严格的同步直驱模式防 Safari 拦截
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      if (!audioRef.current || isExportingVideo) return;
+      if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
       
       if (isPlaying) {
+          audioRef.current.pause();
           setIsPlaying(false);
       } else {
-          // 修复：如果之前已经播放到了最后，再次点击播放时自动重头开始
-          if (audioRef.current.currentTime >= audioRef.current.duration - 0.1 || audioRef.current.ended) {
+          // 修复：播放到底部后归零
+          if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
               audioRef.current.currentTime = 0;
               setCurrentTime(0);
           }
-          setIsPlaying(true);
-          // 兼容 Safari：必须在点击事件的同步帧内触发原生 play()，否则会被拦截
-          const p = audioRef.current.play();
-          if (p !== undefined) p.catch(() => {});
+          
+          // 同步栈内直接调用原生的 play
+          const playPromise = audioRef.current.play();
+          if (playPromise !== undefined) {
+              playPromise.then(() => {
+                  setIsPlaying(true);
+              }).catch(err => {
+                  console.error("播放被拦截:", err);
+                  alert("由于浏览器安全限制，自动播放被拦截。请重试点击。");
+                  setIsPlaying(false);
+              });
+          } else {
+              setIsPlaying(true);
+          }
       }
   };
 
   const handleTimeUpdate = () => { 
       if (audioRef.current && !isExportingVideo) setCurrentTime(audioRef.current.currentTime); 
   };
+  
   const handleSeek = (e) => {
     const newTime = parseFloat(e.target.value);
     setCurrentTime(newTime);
     if (audioRef.current) audioRef.current.currentTime = newTime;
   };
+  
   const formatTime = (s) => `${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}.${Math.floor((s%1)*10)}`;
 
   const handleExportSRT = () => {
