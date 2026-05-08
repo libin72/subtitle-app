@@ -60,7 +60,6 @@ const splitChineseText = (text) => {
       }
       
       if (shouldSplit) {
-          // 纯净度检查：如果当前块只包含标点或空格，将其吸附到上一个块中，防止标点落单
           const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
           if (pureText.length > 0) {
               chunks.push(currentChunk.trim());
@@ -391,7 +390,7 @@ export default function App() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  // ================= 视频实时渲染导出 (Canvas + MediaRecorder) =================
+  // ================= 视频实时渲染导出 (Canvas + MediaRecorder, MacOS 兼容版) =================
   const wrapTextCanvas = (ctx, text, x, y, maxWidth, lineHeight) => {
       if (!text) return y;
       let line = '';
@@ -441,38 +440,76 @@ export default function App() {
 
       const canvas = exportCanvasRef.current;
       const ctx = canvas.getContext('2d');
-      const audio = new Audio(formData.audioUrl);
-      audio.crossOrigin = "anonymous";
       
+      // 预先绘制一帧黑屏，防止 Safari captureStream 崩溃
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, 1080, 1920);
+
       let recordedChunks = [];
       let animationId;
       let mediaRecorder;
 
       try {
+          if (!canvas.captureStream) {
+             throw new Error("您的浏览器不支持 Canvas 视频流捕获。请尝试使用最新版 Chrome 浏览器。");
+          }
+
           const canvasStream = canvas.captureStream(30);
+          
+          const audio = new Audio(formData.audioUrl);
+          audio.crossOrigin = "anonymous";
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           const dest = audioCtx.createMediaStreamDestination();
           const source = audioCtx.createMediaElementSource(audio);
-          source.connect(dest);
           
-          const combinedStream = new MediaStream([
+          source.connect(dest);
+          // Safari 兼容性：需要将 source 也连接到设备输出，否则 MediaRecorder 可能收不到声音数据
+          source.connect(audioCtx.destination); 
+          
+          const audioTracks = dest.stream.getAudioTracks();
+          const combinedTracks = [
               ...canvasStream.getVideoTracks(),
-              ...dest.stream.getAudioTracks()
-          ]);
+              ...audioTracks
+          ];
+          const combinedStream = new MediaStream(combinedTracks);
 
-          mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+          // 自动嗅探当前浏览器支持的最优视频格式 (Safari 通常支持 mp4, Chrome 支持 webm)
+          const supportedMimeTypes = [
+              'video/mp4',
+              'video/webm;codecs=vp9',
+              'video/webm;codecs=vp8',
+              'video/webm',
+              '' // 回退到浏览器默认
+          ];
+          
+          let options = {};
+          for (let type of supportedMimeTypes) {
+              if (type === '' || MediaRecorder.isTypeSupported(type)) {
+                  if (type !== '') options.mimeType = type;
+                  break;
+              }
+          }
+
+          mediaRecorder = new MediaRecorder(combinedStream, options);
+          
           mediaRecorder.ondataavailable = (e) => {
-              if (e.data.size > 0) recordedChunks.push(e.data);
+              if (e.data && e.data.size > 0) recordedChunks.push(e.data);
           };
+          
           mediaRecorder.onstop = () => {
-              const blob = new Blob(recordedChunks, { type: 'video/webm' });
+              const type = options.mimeType || 'video/mp4';
+              const extension = type.includes('webm') ? 'webm' : 'mp4';
+              const blob = new Blob(recordedChunks, { type });
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = `${formData.title}_export.webm`;
+              a.download = `${formData.title}_export.${extension}`;
               a.click();
+              
               setIsExportingVideo(false);
               cancelAnimationFrame(animationId);
+              audio.pause();
+              audioCtx.close();
           };
 
           const drawFrame = () => {
@@ -626,7 +663,9 @@ export default function App() {
           };
 
           mediaRecorder.start();
-          audio.play();
+          audio.play().catch(err => {
+              throw new Error("音频播放被浏览器拦截，请先在页面上点击任意位置后再导出。");
+          });
           drawFrame();
 
           audio.onended = () => {
@@ -635,7 +674,7 @@ export default function App() {
 
       } catch (e) {
           console.error(e);
-          alert("录制失败，请检查浏览器兼容性。");
+          alert(`导出失败: ${e.message}\n如果持续失败，建议使用 Chrome 浏览器进行视频导出操作。`);
           setIsExportingVideo(false);
           cancelAnimationFrame(animationId);
       }
@@ -751,7 +790,6 @@ export default function App() {
              )}
           </div>
           
-          {/* 将 pb-28 改为 pb-8 恢复字幕空间 */}
           <div className="flex-1 w-full px-5 pt-4 pb-8 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
