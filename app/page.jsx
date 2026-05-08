@@ -401,6 +401,7 @@ export default function App() {
     let activeSentence = null;
     let activeChunk = null;
     let activeZhChunkText = "";
+    let longestChunkEn = ""; // 用于固定英文字幕框高度的基准
     
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
@@ -410,6 +411,12 @@ export default function App() {
         
         if (currentTime >= sentStart && currentTime <= sentEnd) {
             activeSentence = sent;
+            
+            // 计算当前整句中最长的那一个英文切片，作为高度基准
+            longestChunkEn = sent.enChunks.reduce((prev, current) => {
+                return (current.en.length > prev.en.length) ? current : prev;
+            }, { en: "" }).en;
+
             activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
             
             // 实时动态切分并映射当前时间应该显示的中文字幕切片
@@ -444,6 +451,17 @@ export default function App() {
         if (b) targetImage = b.image;
     }
 
+    // 若正好卡在句子间隙，维持最后的英文和中文显示状态防止闪动
+    let displayEnChunk = "";
+    if (activeSentence) {
+        if (activeChunk) {
+            displayEnChunk = activeChunk.en;
+        } else {
+            // 在空隙时间优先显示最后一个切片
+            displayEnChunk = activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
+        }
+    }
+
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={() => setIsPlaying(!isPlaying)}>
         <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
@@ -467,15 +485,24 @@ export default function App() {
           <div className="flex-1 w-full px-5 pt-4 pb-12 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
-                {/* 英文独立轨道：跟随短促的时间轴滚动 */}
-                <div className="w-full bg-blue-900/60 backdrop-blur-md p-4 rounded-xl border border-blue-500/30 transform transition-all duration-300">
-                  <p className="text-white font-semibold text-lg leading-relaxed text-left">
-                    {activeChunk ? activeChunk.en : activeSentence.enChunks.map(c=>c.en).join(" ")}
-                  </p>
+                {/* 英文独立轨道：跟随短促的时间轴滚动，锁定最大高度防跳动 */}
+                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 relative overflow-hidden">
+                  {/* 隐形占位符：取该句中最长的一个英文切片撑开固定高度 */}
+                  <div className="p-4 opacity-0 pointer-events-none select-none">
+                    <p className="font-semibold text-lg leading-relaxed text-left">
+                      {longestChunkEn}
+                    </p>
+                  </div>
+                  {/* 实际显示字幕，绝对定位到上方 */}
+                  <div className="absolute inset-0 p-4 flex items-start justify-start">
+                    <p className="text-white font-semibold text-lg leading-relaxed text-left">
+                      {displayEnChunk}
+                    </p>
+                  </div>
                 </div>
 
-                {/* 中文独立轨道：按照30汉字限长动态滚动，稍浅的蓝色底色与纯白文字 */}
-                <div className="w-full bg-sky-500/60 backdrop-blur-md p-4 rounded-xl border border-sky-300/40 transform transition-all duration-300 shadow-lg">
+                {/* 中文独立轨道：采用稍浅的Google Blue，跟随英文字幕高度平滑滚动 */}
+                <div className="w-full bg-[#4285F4]/90 backdrop-blur-md p-4 rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg">
                   <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
                     {activeZhChunkText || activeSentence.zh}
                   </p>
