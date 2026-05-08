@@ -425,12 +425,29 @@ export default function App() {
   };
 
   // ================= 播放器与辅助功能 =================
-  useEffect(() => {
-    if (audioRef.current && !isExportingVideo) {
-      if (isPlaying) audioRef.current.play();
-      else audioRef.current.pause();
-    }
-  }, [isPlaying, isExportingVideo]);
+  const togglePlay = (e) => {
+      if (e && e.stopPropagation) e.stopPropagation();
+      if (!audioRef.current || isExportingVideo) return;
+      
+      if (isPlaying) {
+          audioRef.current.pause();
+          setIsPlaying(false);
+      } else {
+          // 必须在同步的用户点击事件中直接调用 play()，否则会被 Safari 等浏览器拦截
+          const playPromise = audioRef.current.play();
+          if (playPromise !== undefined) {
+              playPromise.then(() => {
+                  setIsPlaying(true);
+              }).catch(err => {
+                  console.error("播放被浏览器拦截:", err);
+                  alert("由于浏览器的安全限制，音频播放被拦截，请再次点击尝试。");
+                  setIsPlaying(false);
+              });
+          } else {
+              setIsPlaying(true);
+          }
+      }
+  };
 
   const handleTimeUpdate = () => { 
       if (audioRef.current && !isExportingVideo) setCurrentTime(audioRef.current.currentTime); 
@@ -826,7 +843,7 @@ export default function App() {
     const activeZhChunkToDisplay = activeZhChunkText || (activeSentence ? activeSentence.zh : "");
 
     return (
-      <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={() => setIsPlaying(!isPlaying)}>
+      <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={togglePlay}>
         <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
           <h1 className="text-4xl font-extrabold tracking-tight mb-2 font-sans">KidNuz</h1>
           <p className="text-sm font-medium opacity-95 text-yellow-400">{newsDate || getFormattedDate()}</p>
@@ -969,7 +986,7 @@ export default function App() {
     return (
       <div className="flex-1 flex flex-col bg-gray-100 relative overflow-hidden">
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center space-x-4 shrink-0 shadow-sm z-10">
-           <button onClick={() => setIsPlaying(!isPlaying)} className="w-12 h-12 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 text-white shrink-0 shadow-md">
+           <button onClick={togglePlay} className="w-12 h-12 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 text-white shrink-0 shadow-md">
              {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
            </button>
            <div className="flex-1 space-y-1.5">
