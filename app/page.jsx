@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, Play, Pause, ChevronLeft, 
   CheckCircle, Loader2, Download, Edit3, Clock, 
-  Mic, MessageSquare, ImagePlus, Scissors, Trash2, ArrowUp, Eye, Image as ImageIcon
+  Mic, MessageSquare, ImagePlus, Scissors, ArrowUp, Eye, Image as ImageIcon
 } from 'lucide-react';
 
 // ================= 图片丝滑渐变组件 (16:9 满宽无留白) =================
@@ -58,7 +58,6 @@ export default function App() {
     audioUrl: '',
     audioDuration: 0,
     rawText: ''
-    // 移除了默认的 logoUrl 配置，强制要求全手动上传
   });
 
   // 核心数据状态
@@ -112,7 +111,7 @@ export default function App() {
       const whisperResult = await whisperRes.json();
       if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
       
-      // === 稳健的断句算法 (杜绝末尾落单单词 & U.S. 断句修复) ===
+      // === 稳健的断句算法 (上限20词, 优先强标点, 防孤儿词, 修复U.S.误判) ===
       setProcessMsg("正在分析断句与优化词轴...");
       let finalSourceSegments = [];
 
@@ -120,7 +119,7 @@ export default function App() {
         const text = seg.text.trim();
         const words = text.split(/\s+/);
         
-        if (words.length <= 15) {
+        if (words.length <= 20) {
             finalSourceSegments.push({ start: seg.start, end: seg.end, text: text });
         } else {
             let chunks = [];
@@ -129,26 +128,29 @@ export default function App() {
             words.forEach((w, idx) => {
                 currentChunk.push(w);
                 const wordCount = currentChunk.length;
-                const remainingWords = words.length - 1 - idx; // 剩下还有几个词
+                const remainingWords = words.length - 1 - idx; 
                 const isLastWord = idx === words.length - 1;
 
                 // 正则排除英文缩写造成的误判
                 const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
-                const hasStrong = !isAbbr && /[.?!。？！]['"]*$/.test(w);
+                
+                // 首选优先级：句号、问号、叹号、双引号 (防呆：不是缩写才算)
+                const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
+                // 次选优先级：逗号、分号等
                 const hasWeak = /[,;，；]['"]*$/.test(w);
                 
                 let shouldSplit = false;
                 
                 if (isLastWord) {
                     shouldSplit = true;
-                } else if (wordCount >= 15) {
-                    // 强行触及 15 词上限，强制断开
+                } else if (wordCount >= 20) {
+                    // 强行触及 20 词上限，强制断开
                     shouldSplit = true;
-                } else if (hasStrong && remainingWords > 3) {
-                    // 遇到强标点，且后面还有足够多的词，才断句 (防止最后剩1-3个词)
+                } else if (hasStrong && remainingWords >= 3) {
+                    // 遇到强标点，且后面至少还有3个词，才断句 (防止尾部剩余1-2个词独立成段)
                     shouldSplit = true;
-                } else if (hasWeak && wordCount >= 8 && remainingWords > 3) {
-                    // 遇到弱标点，当前已满8词，且后面有足够多的词
+                } else if (hasWeak && wordCount >= 10 && remainingWords >= 3) {
+                    // 遇到弱标点，当前已满10词，且后面有足够多的词
                     shouldSplit = true;
                 }
 
@@ -158,6 +160,7 @@ export default function App() {
                 }
             });
 
+            // 按字符比例均分时间轴
             const totalChars = chunks.reduce((acc, c) => acc + c.length, 0);
             const duration = seg.end - seg.start;
             let currentT = seg.start;
@@ -170,13 +173,13 @@ export default function App() {
         }
       });
 
-      // --- 第 2 步：分批无损翻译与日期提取 (严格缩小批次防漏翻) ---
+      // --- 第 2 步：分批无损翻译与日期提取 ---
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
       let translatedData = [];
       let extractedDateStr = "";
       
-      const chunkSize = 10; // 缩小每次请求的数量至10句，确保AI稳定翻译绝不遗漏
+      const chunkSize = 10; 
       const totalChunks = Math.ceil(inputMapping.length / chunkSize);
 
       for (let i = 0; i < inputMapping.length; i += chunkSize) {
@@ -184,11 +187,13 @@ export default function App() {
         const chunk = inputMapping.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
+        // 升级版 Prompt: 强调上下文连贯与强制简体中文
         const translationPrompt = `You are a professional subtitle translator.
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
-        2. Translate English to natural Chinese.
+        2. Translate English to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
-        4. CRITICAL: You MUST translate EVERY SINGLE segment provided. Return EXACTLY ${chunk.length} items in the "subtitles" array, mapping exactly to the input "id".
+        4. CRITICAL: You MUST translate EVERY SINGLE segment provided. Return EXACTLY ${chunk.length} items in "subtitles", mapping exactly to the input "id".
+        5. CONTEXTUAL TRANSLATION: Subtitles are often cut mid-sentence due to time limits. You MUST look at the surrounding segments to understand the full complete meaning. Translate the FULL sentence naturally, and then distribute the Chinese translation appropriately across the segments. It is acceptable if the Chinese text doesn't match the English word-for-word in a specific tiny segment, as long as the overall Chinese meaning flows perfectly across the continuous blocks.
 
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 800) : "None."}
         INPUT: ${JSON.stringify(chunk)}
@@ -224,14 +229,14 @@ export default function App() {
 
       setNewsDate(extractedDateStr || getFormattedDate());
 
-      // --- 第 3 步：初始化单个默认块 (无任何默认图片) ---
+      // --- 第 3 步：初始化单个默认块 (无默认图片) ---
       setProcessMsg("3. 正在组装项目...");
       const initialBlockId = 'block-0';
       
       setBlocks([{
         id: initialBlockId,
         title: '新闻开场 (Intro)',
-        image: "" // 初始没有默认图片
+        image: "" 
       }]);
 
       let finalSubtitles = finalSourceSegments.map((seg, i) => {
@@ -260,63 +265,42 @@ export default function App() {
   };
 
   // ================= 手动区块切分逻辑 =================
-  
-  // 在指定字幕ID下方拆分出新区块
   const handleSplitAfter = (subId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
-    
-    // 1. 插入新 Block (默认无图片)
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
         const newBlocks = [...prev];
-        newBlocks.splice(idx + 1, 0, { 
-            id: newBlockId, 
-            title: `新闻片段 ${newBlocks.length + 1}`, 
-            image: "" 
-        });
+        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `新闻片段 ${newBlocks.length + 1}`, image: "" });
         return newBlocks;
     });
-    
-    // 2. 将该 ID 之后且属于原 Block 的字幕划入新 Block
     setSubtitles(prev => {
         let passedSplitPoint = false;
         return prev.map(sub => {
-            if (sub.id === subId) {
-                passedSplitPoint = true;
-                return sub;
-            }
-            if (passedSplitPoint && sub.blockId === currentBlockId) {
-                return { ...sub, blockId: newBlockId };
-            }
+            if (sub.id === subId) { passedSplitPoint = true; return sub; }
+            if (passedSplitPoint && sub.blockId === currentBlockId) return { ...sub, blockId: newBlockId };
             return sub;
         });
     });
   };
 
-  // 向上合并区块
   const handleMergeUp = (blockId) => {
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === blockId);
         if (idx <= 0) return prev;
         const targetBlockId = prev[idx - 1].id;
-        
-        // 更新字幕归属
         setSubtitles(subs => subs.map(sub => sub.blockId === blockId ? { ...sub, blockId: targetBlockId } : sub));
-        
         const newBlocks = [...prev];
         newBlocks.splice(idx, 1);
         return newBlocks;
     });
   };
 
-  // 替换区块图片
   const handleReplaceBlockImage = (blockId, file) => {
     if (!file) return;
     const newBlobUrl = URL.createObjectURL(file);
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, image: newBlobUrl } : b));
   };
 
-  // 修改区块标题
   const handleRenameBlock = (blockId, newTitle) => {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
@@ -352,7 +336,6 @@ export default function App() {
 
   // ================= 视图渲染 =================
 
-  // 渲染左侧手机预览画面
   const renderPhoneScreen = () => {
     if (isProcessing) {
       return (
@@ -372,22 +355,24 @@ export default function App() {
       );
     }
 
+    // 核心修复：即使处于Gap(空隙时间)，也要保持显示上一个Subtitle所在的Block图片，拒绝闪黑屏
     const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
-    let targetImage = ""; // 默认无图片
-    if (activeSubtitle) {
-        const b = blocks.find(blk => blk.id === activeSubtitle.blockId);
+    // 寻找当前或刚刚过去的最新字幕，用于锚定图片
+    const activeOrLastSubtitle = activeSubtitle || subtitles.slice().reverse().find(s => s.start <= currentTime) || subtitles[0];
+    
+    let targetImage = ""; 
+    if (activeOrLastSubtitle) {
+        const b = blocks.find(blk => blk.id === activeOrLastSubtitle.blockId);
         if (b) targetImage = b.image;
     }
 
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={() => setIsPlaying(!isPlaying)}>
-        {/* 顶部标题区 */}
         <div className="flex-none pt-16 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
           <h1 className="text-4xl font-extrabold tracking-tight mb-2 font-sans">KidNuz</h1>
           <p className="text-sm font-medium opacity-95 text-yellow-400">{newsDate || getFormattedDate()}</p>
         </div>
 
-        {/* A/B 分区 */}
         <div className="flex-1 flex flex-col w-full z-10 overflow-hidden">
           <div className="w-full flex-shrink-0 bg-gray-900 aspect-video flex items-center justify-center border-y border-white/10">
              {targetImage ? (
@@ -422,10 +407,8 @@ export default function App() {
     );
   };
 
-  // 渲染右侧工作区
   const renderWorkspace = () => {
     if (subtitles.length === 0) {
-      // 初始上传配置面板
       return (
         <div className="flex-1 overflow-y-auto bg-gray-50 flex flex-col">
           <div className="p-8 max-w-3xl mx-auto w-full space-y-8 flex-1">
@@ -484,10 +467,8 @@ export default function App() {
       );
     }
 
-    // 后台手动切分编辑器
     return (
       <div className="flex-1 flex flex-col bg-gray-100 relative overflow-hidden">
-        {/* 控制条 */}
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center space-x-4 shrink-0 shadow-sm z-10">
            <button onClick={() => setIsPlaying(!isPlaying)} className="w-12 h-12 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 text-white shrink-0 shadow-md">
              {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
@@ -503,7 +484,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* 区块列表 */}
         <div className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
           {blocks.map((block, bIdx) => {
             const blockSubs = subtitles.filter(s => s.blockId === block.id);
@@ -511,7 +491,6 @@ export default function App() {
             
             return (
               <div key={block.id} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col 2xl:flex-row">
-                 {/* 侧边：配图上传区 */}
                  <div className="w-full 2xl:w-[320px] bg-gray-50 border-b 2xl:border-b-0 2xl:border-r border-gray-200 p-5 flex flex-col shrink-0">
                     <div className="flex items-center justify-between mb-4">
                        <input 
@@ -545,7 +524,6 @@ export default function App() {
                     </label>
                  </div>
                  
-                 {/* 主体：字幕编辑区 */}
                  <div className="flex-1 p-5 bg-white max-h-[500px] overflow-y-auto space-y-3 relative">
                     {blockSubs.map((sub, sIdx) => {
                        const idx = subtitles.findIndex(s => s.id === sub.id);
@@ -576,7 +554,6 @@ export default function App() {
                               </div>
                             </div>
 
-                            {/* 手动切分按钮 */}
                             {!isLastOverall && (
                               <div className="flex justify-center my-1 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
@@ -597,7 +574,6 @@ export default function App() {
     );
   };
 
-  // 全局渲染主骨架
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
       <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
@@ -607,9 +583,7 @@ export default function App() {
          <div className="absolute top-6 left-8 text-white/50 text-xs font-bold tracking-widest flex items-center">
             <Eye size={14} className="mr-2" /> LIVE PREVIEW
          </div>
-         {/* 手机外壳 */}
          <div className="w-[375px] h-[812px] bg-black rounded-[3rem] border-[14px] border-gray-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden flex flex-col ring-1 ring-white/10">
-            {/* 刘海屏 */}
             <div className="absolute top-0 inset-x-0 h-6 bg-gray-800 rounded-b-2xl w-1/2 mx-auto z-50"></div>
             {renderPhoneScreen()}
          </div>
