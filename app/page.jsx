@@ -66,6 +66,8 @@ const splitChineseText = (text) => {
               chunks.push(currentChunk.trim());
           } else if (chunks.length > 0) {
               chunks[chunks.length - 1] += currentChunk.trim();
+          } else {
+              chunks.push(currentChunk.trim());
           }
           currentChunk = "";
       }
@@ -124,14 +126,14 @@ export default function App() {
   
   const audioRef = useRef(null);
   const exportCanvasRef = useRef(null);
-  const imageElementCache = useRef({}); // 缓存 Image 对象供 Canvas 绘制使用
+  const imageElementCache = useRef({}); 
 
   const getFormattedDate = () => {
     const date = new Date();
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   };
 
-  // 预加载图片到缓存中，供导出视频使用
+  // 预加载图片到缓存中
   useEffect(() => {
     blocks.forEach(b => {
         if (b.image && !imageElementCache.current[b.image]) {
@@ -394,7 +396,6 @@ export default function App() {
       if (!text) return y;
       let line = '';
       let currentY = y;
-      // 兼容中英文分词断行
       const tokens = text.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || text.split('');
       for (let n = 0; n < tokens.length; n++) {
           const token = tokens[n];
@@ -478,25 +479,21 @@ export default function App() {
               const time = audio.currentTime;
               setExportProgress(time / audio.duration);
 
-              // 绘制黑色背景
               ctx.fillStyle = '#000000';
               ctx.fillRect(0, 0, 1080, 1920);
 
-              // 1. 顶部标题区域
               ctx.fillStyle = '#ffffff';
               ctx.font = 'bold 120px sans-serif';
               ctx.textAlign = 'center';
               ctx.fillText('KidNuz', 540, 240);
 
-              ctx.fillStyle = '#facc15'; // yellow-400
+              ctx.fillStyle = '#facc15'; 
               ctx.font = '500 45px sans-serif';
               ctx.fillText(newsDate || getFormattedDate(), 540, 320);
 
-              // 智能锚定当前状态
               let activeSentence = null;
               let activeChunk = null;
               let activeZhChunkText = "";
-              let longestChunkEn = ""; 
 
               for (let i = 0; i < sentences.length; i++) {
                   const sent = sentences[i];
@@ -506,7 +503,6 @@ export default function App() {
                   
                   if (time >= sentStart && time <= sentEnd) {
                       activeSentence = sent;
-                      longestChunkEn = sent.enChunks.reduce((prev, current) => (current.en.length > prev.en.length) ? current : prev, { en: "" }).en;
                       activeChunk = sent.enChunks.find(c => time >= c.start && time <= c.end);
                       
                       const zhChunksText = splitChineseText(sent.zh);
@@ -541,41 +537,44 @@ export default function App() {
                   displayEnChunk = activeChunk ? activeChunk.en : activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
               }
 
-              // 2. 绘制配图 (16:9 区块)
               const imgY = 420;
-              const imgH = 607; // 1080 * 9 / 16
+              const imgH = 607; 
               if (targetImage && imageElementCache.current[targetImage]) {
                   ctx.drawImage(imageElementCache.current[targetImage], 0, imgY, 1080, imgH);
               } else {
-                  ctx.fillStyle = '#111827'; // gray-900
+                  ctx.fillStyle = '#111827'; 
                   ctx.fillRect(0, imgY, 1080, imgH);
               }
 
-              // 3. 绘制独立字幕面板
+              // ================= 视频字幕高度基准渲染计算 =================
               if (activeSentence) {
                   const boxWidth = 960;
                   const boxX = 60;
                   const textX = 100;
                   const textMaxWidth = 880;
 
-                  // 英文面板 (模拟蓝底框)
                   const enBoxY = imgY + imgH + 60;
-                  
-                  // 计算最大英文占据的高度作为固定基底
                   ctx.font = '600 48px sans-serif';
-                  let simY = enBoxY + 70;
-                  const tokens = longestChunkEn.match(/[\w\.\,\!\?\-\']+|\s+/g) || longestChunkEn.split('');
-                  let simLine = '';
-                  for (let n = 0; n < tokens.length; n++) {
-                      const testLine = simLine + tokens[n];
-                      if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
-                          simLine = tokens[n];
-                          simY += 65;
-                      } else {
-                          simLine = testLine;
+                  
+                  // 遍历英文切片，找到渲染后的实际最大高度
+                  let maxEnBoxHeight = 0;
+                  activeSentence.enChunks.forEach(chunk => {
+                      let simY = enBoxY + 70;
+                      const tokens = chunk.en.match(/[\w\.\,\!\?\-\']+|\s+/g) || chunk.en.split('');
+                      let simLine = '';
+                      for (let n = 0; n < tokens.length; n++) {
+                          const testLine = simLine + tokens[n];
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
+                              simLine = tokens[n];
+                              simY += 65;
+                          } else {
+                              simLine = testLine;
+                          }
                       }
-                  }
-                  const enBoxHeight = (simY - enBoxY) + 50;
+                      const h = (simY - enBoxY) + 50;
+                      if (h > maxEnBoxHeight) maxEnBoxHeight = h;
+                  });
+                  const enBoxHeight = maxEnBoxHeight;
 
                   ctx.fillStyle = 'rgba(30, 58, 138, 0.6)'; 
                   ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
@@ -588,34 +587,39 @@ export default function App() {
                   ctx.textAlign = 'left';
                   wrapTextCanvas(ctx, displayEnChunk, textX, enBoxY + 70, textMaxWidth, 65);
 
-                  // 中文面板 (跟在固定高度的英文框下方)
+                  // 遍历中文切片，找到最大高度
                   const zhBoxY = enBoxY + enBoxHeight + 40;
                   ctx.font = 'bold 42px sans-serif';
+                  let maxZhBoxHeight = 0;
+                  const zhChunksList = splitChineseText(activeSentence.zh);
+                  const zhChunksToMeasure = zhChunksList.length > 0 ? zhChunksList : [activeSentence.zh];
                   
-                  // 估算中文高度
-                  const zhText = activeZhChunkText || activeSentence.zh;
-                  let zhSimY = zhBoxY + 65;
-                  const zhTokens = zhText.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || zhText.split('');
-                  let zhSimLine = '';
-                  for (let n = 0; n < zhTokens.length; n++) {
-                      const testLine = zhSimLine + zhTokens[n];
-                      if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
-                          zhSimLine = zhTokens[n];
-                          zhSimY += 60;
-                      } else {
-                          zhSimLine = testLine;
+                  zhChunksToMeasure.forEach(chunk => {
+                      let zhSimY = zhBoxY + 65;
+                      const zhTokens = chunk.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || chunk.split('');
+                      let zhSimLine = '';
+                      for (let n = 0; n < zhTokens.length; n++) {
+                          const testLine = zhSimLine + zhTokens[n];
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
+                              zhSimLine = zhTokens[n];
+                              zhSimY += 60;
+                          } else {
+                              zhSimLine = testLine;
+                          }
                       }
-                  }
-                  const zhBoxHeight = (zhSimY - zhBoxY) + 45;
+                      const h = (zhSimY - zhBoxY) + 45;
+                      if (h > maxZhBoxHeight) maxZhBoxHeight = h;
+                  });
+                  const zhBoxHeight = maxZhBoxHeight;
 
-                  ctx.fillStyle = 'rgba(66, 133, 244, 0.9)'; // Google Blue
+                  ctx.fillStyle = 'rgba(66, 133, 244, 0.9)'; 
                   ctx.strokeStyle = 'rgba(66, 133, 244, 0.5)';
                   drawRoundRect(ctx, boxX, zhBoxY, boxWidth, zhBoxHeight, 24);
                   ctx.fill();
                   ctx.stroke();
 
                   ctx.fillStyle = '#ffffff';
-                  wrapTextCanvas(ctx, zhText, textX, zhBoxY + 65, textMaxWidth, 60);
+                  wrapTextCanvas(ctx, activeZhChunkText || activeSentence.zh, textX, zhBoxY + 65, textMaxWidth, 60);
               }
 
               animationId = requestAnimationFrame(drawFrame);
@@ -660,7 +664,6 @@ export default function App() {
     let activeSentence = null;
     let activeChunk = null;
     let activeZhChunkText = "";
-    let longestChunkEn = ""; 
     
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
@@ -670,11 +673,6 @@ export default function App() {
         
         if (currentTime >= sentStart && currentTime <= sentEnd) {
             activeSentence = sent;
-            
-            longestChunkEn = sent.enChunks.reduce((prev, current) => {
-                return (current.en.length > prev.en.length) ? current : prev;
-            }, { en: "" }).en;
-
             activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
             
             const zhChunksText = splitChineseText(sent.zh);
@@ -715,6 +713,10 @@ export default function App() {
         }
     }
 
+    // 将中文字幕列表预处理以供网格渲染
+    const zhChunksTextList = activeSentence ? splitChineseText(activeSentence.zh) : [];
+    const activeZhChunkToDisplay = activeZhChunkText || (activeSentence ? activeSentence.zh : "");
+
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={() => setIsPlaying(!isPlaying)}>
         <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
@@ -737,23 +739,32 @@ export default function App() {
           <div className="flex-1 w-full px-5 pt-4 pb-28 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
-                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 relative overflow-hidden">
-                  <div className="p-4 opacity-0 pointer-events-none select-none">
-                    <p className="font-semibold text-lg leading-relaxed text-left">
-                      {longestChunkEn}
-                    </p>
-                  </div>
-                  <div className="absolute inset-0 p-4 flex items-start justify-start">
-                    <p className="text-white font-semibold text-lg leading-relaxed text-left">
-                      {displayEnChunk}
-                    </p>
-                  </div>
+                {/* 英文独立轨道：利用 CSS Grid 自动撑开并锁定最高切片的高度，杜绝截断和跳动 */}
+                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 grid">
+                  {activeSentence.enChunks.map((chunk, cIdx) => (
+                    <div key={chunk.id || cIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${displayEnChunk === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                      <p className="text-white font-semibold text-lg leading-relaxed text-left">
+                        {chunk.en}
+                      </p>
+                    </div>
+                  ))}
                 </div>
 
-                <div className="w-full bg-[#4285F4]/90 backdrop-blur-md p-4 rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg">
-                  <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
-                    {activeZhChunkText || activeSentence.zh}
-                  </p>
+                {/* 中文独立轨道：利用 CSS Grid 同步锁定高度，背景使用浅蓝(Google Blue)，纯白文字 */}
+                <div className="w-full bg-[#4285F4]/90 backdrop-blur-md rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg grid">
+                  {zhChunksTextList.length > 0 ? zhChunksTextList.map((zhChunk, zIdx) => (
+                    <div key={zIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${activeZhChunkToDisplay === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
+                        {zhChunk}
+                      </p>
+                    </div>
+                  )) : (
+                    <div className="col-start-1 row-start-1 p-4 flex items-start justify-start opacity-100 z-10">
+                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
+                        {activeSentence.zh}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </>
             ) : null}
