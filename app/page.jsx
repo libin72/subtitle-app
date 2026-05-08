@@ -33,7 +33,7 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 中文字幕智能动态切片辅助函数 (已修复孤立标点问题) =================
+// ================= 中文字幕智能动态切片辅助函数 =================
 const splitChineseText = (text) => {
   if (!text) return [];
   const chunks = [];
@@ -83,7 +83,7 @@ const splitChineseText = (text) => {
   return chunks;
 };
 
-// ================= 辅助函数：延时等待 =================
+// 辅助延时函数
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
@@ -92,10 +92,10 @@ export default function App() {
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 将文本翻译接口默认替换为 DeepSeek
-  const [textBaseUrl, setTextBaseUrl] = useState('https://api.deepseek.com/v1');
+  // 默认切换为 Google Gemini 免费接口 (OpenAI 兼容模式)
+  const [textBaseUrl, setTextBaseUrl] = useState('https://generativelanguage.googleapis.com/v1beta/openai/');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('deepseek-chat');
+  const [textModel, setTextModel] = useState('gemini-1.5-flash');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
@@ -124,7 +124,6 @@ export default function App() {
   const [processMsg, setProcessMsg] = useState("");
   const [newsDate, setNewsDate] = useState('');
   
-  // 视频导出状态
   const [isExportingVideo, setIsExportingVideo] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   
@@ -137,7 +136,6 @@ export default function App() {
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   };
 
-  // 预加载图片到缓存中
   useEffect(() => {
     blocks.forEach(b => {
         if (b.image && !imageElementCache.current[b.image]) {
@@ -260,9 +258,10 @@ export default function App() {
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
+        // 移除强制的 response_format，全靠 Prompt 强引导，提升在 DeepSeek 上的容错率
         const translationPrompt = `You are a professional subtitle translator.
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
-        2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
+        2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文).
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
         4. CRITICAL: You MUST translate EVERY SINGLE sentence provided. Return EXACTLY ${chunk.length} items mapping exactly to the input "id".
         5. CONTEXTUAL TRANSLATION: Understand the full context of the paragraph. Ensure the Chinese translation represents the complete grammatical meaning of the sentence.
@@ -270,7 +269,7 @@ export default function App() {
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 1000) : "None."}
         INPUT JSON: ${JSON.stringify(chunk.map(c => ({ id: c.id, en: c.en })))}
 
-        OUTPUT JSON FORMAT:
+        OUTPUT MUST BE VALID JSON FORMAT:
         {
           "extractedDate": "...",
           "subtitles": [ { "id": <exact_id>, "zh": "..." } ]
@@ -280,7 +279,6 @@ export default function App() {
         let retryCount = 0;
         const maxRetries = 3;
 
-        // 加入带有指数退避机制的重试循环，专治 429 限流报错
         while (!chunkSuccess && retryCount < maxRetries) {
           try {
             const llmRes = await fetch(chatUrl, {
@@ -289,46 +287,75 @@ export default function App() {
               body: JSON.stringify({
                 model: textModel.trim(),
                 messages: [{ role: 'user', content: translationPrompt }],
-                temperature: 0.1,
-                response_format: { type: "json_object" } 
+                temperature: 0.1
               })
             });
 
-            if (llmRes.status === 429) {
-                retryCount++;
-                setProcessMsg(`触发接口限流 (429)，等待 ${retryCount * 5} 秒后自动重试 (${retryCount}/${maxRetries})...`);
-                await delay(5000 * retryCount); // 退避等待：5秒, 10秒, 15秒
-                continue;
+            // 精准错误抛出与拦截，不再一刀切报“网络错误”
+            if (!llmRes.ok) {
+                const errorData = await llmRes.json().catch(() => ({}));
+                const errMsg = errorData.error?.message || llmRes.statusText;
+                
+                if (llmRes.status === 429) {
+                    throw new Error("429"); // 特殊标识，用于触发退避延时重试
+                } else if (llmRes.status === 402) {
+                    throw new Error(`402 余额不足: 您的 API Key 已欠费，请前往充值`);
+                } else if (llmRes.status === 400) {
+                    throw new Error(`400 格式校验拒绝: ${errMsg}`);
+                } else if (llmRes.status === 401) {
+                    throw new Error(`401 鉴权失败: API Key 无效或填写错误`);
+                } else {
+                    throw new Error(`${llmRes.status} 服务器报错: ${errMsg}`);
+                }
             }
-
-            if (!llmRes.ok) throw new Error(`翻译请求返回状态码: ${llmRes.status}`);
             
             const llmResult = await llmRes.json();
-            const parsed = JSON.parse(llmResult.choices[0].message.content);
+            const content = llmResult.choices[0].message.content;
+            
+            // 安全使用正则提取 JSON 结构，兼容所有大模型的冗余回复字符
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error("大模型未返回有效的 JSON 结构");
+            
+            const parsed = JSON.parse(jsonMatch[0]);
             const transDict = {};
             (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
             
             chunk.forEach(sent => {
-                sent.zh = transDict[sent.id] || "（翻译丢失）";
+                sent.zh = transDict[sent.id] || "（大模型未返回此段翻译）";
             });
 
             if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
-            chunkSuccess = true; // 标记成功，跳出重试循环
+            chunkSuccess = true;
 
           } catch (e) {
             console.error("当前批次翻译异常:", e);
+            
+            // 处理限流退避
+            if (e.message === "429") {
+                retryCount++;
+                setProcessMsg(`大模型接口繁忙 (429限流)，等待 ${retryCount * 5} 秒后自动重试...`);
+                await delay(5000 * retryCount);
+                continue;
+            }
+            
+            // 细分显示真实错误
+            let displayError = e.message;
+            if (e.name === "TypeError" && e.message.includes("fetch")) {
+                displayError = "浏览器 CORS 跨域拦截 或 网络断开";
+            }
+            
             if (retryCount >= maxRetries - 1) {
-                // 重试用尽，依然失败，则保留空壳并继续
-                chunk.forEach(sent => { sent.zh = "（网络请求失败，可手动补充）"; });
+                // 重试用尽，将报错注入到界面供用户识别
+                chunk.forEach(sent => { sent.zh = `【请求失败】${displayError}`; });
                 break;
             }
             retryCount++;
-            setProcessMsg(`网络异常，正在重试 (${retryCount}/${maxRetries})...`);
+            setProcessMsg(`翻译异常 [${displayError}]，正在重试 (${retryCount}/${maxRetries})...`);
             await delay(3000);
           }
         }
-
-        // 每次成功后固定延时 2 秒，温柔对待 API 接口防限流
+        
+        // 每个批次成功后，主动延时2秒，温柔保护大模型 API 防限流
         if (i + chunkSize < parsedSentences.length) {
             await delay(2000);
         }
@@ -387,6 +414,10 @@ export default function App() {
     if (!file) return;
     const newBlobUrl = URL.createObjectURL(file);
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, image: newBlobUrl } : b));
+  };
+
+  const handleRenameBlock = (blockId, newTitle) => {
+    setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
   // ================= 播放器与辅助功能 =================
@@ -475,7 +506,6 @@ export default function App() {
       const canvas = exportCanvasRef.current;
       const ctx = canvas.getContext('2d');
       
-      // 预先绘制一帧黑屏，防止 Safari captureStream 崩溃
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, 1080, 1920);
 
@@ -497,7 +527,6 @@ export default function App() {
           const source = audioCtx.createMediaElementSource(audio);
           
           source.connect(dest);
-          // Safari 兼容性：需要将 source 也连接到设备输出，否则 MediaRecorder 可能收不到声音数据
           source.connect(audioCtx.destination); 
           
           const audioTracks = dest.stream.getAudioTracks();
@@ -507,13 +536,12 @@ export default function App() {
           ];
           const combinedStream = new MediaStream(combinedTracks);
 
-          // 自动嗅探当前浏览器支持的最优视频格式 (Safari 通常支持 mp4, Chrome 支持 webm)
           const supportedMimeTypes = [
               'video/mp4',
               'video/webm;codecs=vp9',
               'video/webm;codecs=vp8',
               'video/webm',
-              '' // 回退到浏览器默认
+              '' 
           ];
           
           let options = {};
@@ -792,7 +820,6 @@ export default function App() {
         }
     }
 
-    // 将中文字幕列表预处理以供网格渲染
     const zhChunksTextList = activeSentence ? splitChineseText(activeSentence.zh) : [];
     const activeZhChunkToDisplay = activeZhChunkText || (activeSentence ? activeSentence.zh : "");
 
@@ -814,7 +841,6 @@ export default function App() {
                 </div>
              )}
              
-             {/* 移动到图片中间的播放按钮 */}
              {!isPlaying && (
                <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
                  <div className="bg-black/50 rounded-full p-4 backdrop-blur-md border border-white/20 shadow-2xl flex items-center justify-center">
@@ -827,9 +853,7 @@ export default function App() {
           <div className="flex-1 w-full px-5 pt-4 pb-8 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
-                {/* 英文独立轨道：利用 CSS Grid 自动撑开并锁定最高切片的高度，杜绝截断和跳动 */}
                 <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 grid">
-                  {/* 隐形占位符：取该句中最长的一个英文切片撑开固定高度 */}
                   <div className="col-start-1 row-start-1 p-4 opacity-0 pointer-events-none select-none">
                     <p className="font-semibold text-lg leading-relaxed text-left">
                       {longestChunkEn}
@@ -844,7 +868,6 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* 中文独立轨道：利用 CSS Grid 同步锁定高度，背景使用浅蓝(Google Blue)，纯白文字 */}
                 <div className="w-full bg-[#4285F4]/90 backdrop-blur-md rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg grid">
                   {zhChunksTextList.length > 0 ? zhChunksTextList.map((zhChunk, zIdx) => (
                     <div key={zIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${activeZhChunkToDisplay === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
@@ -865,7 +888,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* 底部可拖动进度条 */}
         <div className="absolute bottom-0 left-0 right-0 h-2 bg-gray-800 z-50 group" onClick={(e) => e.stopPropagation()}>
           <div className="h-full bg-yellow-400 transition-all duration-100 ease-linear pointer-events-none" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
           <input 
@@ -904,7 +926,7 @@ export default function App() {
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => setTextBaseUrl(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <input type="text" value={textBaseUrl} onChange={e => setTextBaseUrl(e.target.value)} placeholder="例如: https://generativelanguage.googleapis.com/v1beta/openai/" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
                   <input type="password" placeholder="API Key" value={textKey} onChange={e => setTextKey(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                   <input type="text" placeholder="Model" value={textModel} onChange={e => setTextModel(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
