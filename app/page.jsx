@@ -18,7 +18,7 @@ const CrossfadeImage = ({ src }) => {
   }, [src]);
 
   return (
-    <div className="relative w-full h-full flex-shrink-0 bg-gray-950 overflow-hidden shadow-xl">
+    <div className="relative w-full h-full flex-shrink-0 overflow-hidden bg-black">
       {images.map((imgSrc, idx) => (
         <img
           key={`${imgSrc}-${idx}`}
@@ -33,78 +33,112 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 中文字幕智能动态切片辅助函数 =================
-const splitChineseText = (text) => {
-  if (!text) return [];
-  const chunks = [];
-  let currentChunk = "";
-  
-  for (let i = 0; i < text.length; i++) {
-      const char = text[i];
-      currentChunk += char;
-      const remaining = text.length - 1 - i;
-      
-      const isStrong = /[。？！”’\n]/.test(char);
-      const isWeak = /[，；、]/.test(char);
-      const isLast = i === text.length - 1;
-      
-      let shouldSplit = false;
-      if (isLast) {
-          shouldSplit = true;
-      } else if (currentChunk.length >= 30) {
-          shouldSplit = true;
-      } else if (isStrong && remaining >= 5) {
-          shouldSplit = true;
-      } else if (isWeak && currentChunk.length >= 15 && remaining >= 5) {
-          shouldSplit = true;
-      }
-      
-      if (shouldSplit) {
-          const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
-          if (pureText.length > 0) {
-              chunks.push(currentChunk.trim());
-          } else if (chunks.length > 0) {
-              chunks[chunks.length - 1] += currentChunk.trim();
-          } else {
-              chunks.push(currentChunk.trim());
-          }
-          currentChunk = "";
-      }
-  }
-  
-  if (currentChunk.trim().length > 0) {
-      const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
-      if (pureText.length > 0) {
-          chunks.push(currentChunk.trim());
-      } else if (chunks.length > 0) {
-          chunks[chunks.length - 1] += currentChunk.trim();
-      }
-  }
-  return chunks;
+// ================= 智能断句与排版算法 (防 Orphan, 缩略语过滤, 20词上限) =================
+const buildSubtitleStructures = (allWords, rawText) => {
+    const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
+    const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
+
+    let sentences = [];
+    let curSentenceWords = [];
+    
+    // 第一步：根据强标点和段落划分【翻译基准长句】
+    allWords.forEach((wObj, i) => {
+        curSentenceWords.push(wObj);
+        const wText = wObj.word.trim();
+        const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
+        
+        const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
+        const isParagraphBreak = /\n/.test(wText) || nextGap > 1.5;
+        
+        if (isStrongPunct || isParagraphBreak || i === allWords.length - 1) {
+            sentences.push([...curSentenceWords]);
+            curSentenceWords = [];
+        }
+    });
+
+    let parsedSentences = [];
+    
+    // 第二步：将长句内部按照 20词 / 标点 划分为【屏幕显示切片 Chunks】
+    sentences.forEach((sentWords, sIdx) => {
+        let chunks = [];
+        let curChunkWords = [];
+        
+        for (let i = 0; i < sentWords.length; i++) {
+            curChunkWords.push(sentWords[i]);
+            const wText = sentWords[i].word.trim();
+            const isWeakPunct = /[,;，；]['"]*$/.test(wText);
+            const remainingWords = sentWords.length - 1 - i;
+            
+            let forceSplit = false;
+            if (i === sentWords.length - 1) {
+                forceSplit = true;
+            } else if (curChunkWords.length >= 20) {
+                forceSplit = true;
+            } else if (curChunkWords.length >= 12 && isWeakPunct && remainingWords >= 3) {
+                forceSplit = true; 
+            }
+            
+            if (forceSplit) {
+                chunks.push({
+                    id: `c_${sIdx}_${chunks.length}`,
+                    en: curChunkWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
+                    start: curChunkWords[0].start,
+                    end: curChunkWords[curChunkWords.length - 1].end,
+                    words: curChunkWords
+                });
+                curChunkWords = [];
+            }
+        }
+        
+        if (chunks.length > 0) {
+            parsedSentences.push({
+                id: `s_${sIdx}`,
+                blockId: 'block-0',
+                en: sentWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
+                zh: "",
+                chunks: chunks
+            });
+        }
+    });
+    
+    return parsedSentences;
 };
 
-// 辅助延时函数
+// ================= 中文按30字上限自适应切片 =================
+const splitChineseText = (text) => {
+    if (!text) return [];
+    const chunks = [];
+    let currentChunk = "";
+    for (let i = 0; i < text.length; i++) {
+        currentChunk += text[i];
+        if (currentChunk.length >= 30 && /[。？！”’，；、\n]/.test(text[i])) {
+            chunks.push(currentChunk.trim());
+            currentChunk = "";
+        }
+    }
+    if (currentChunk.trim().length > 0) chunks.push(currentChunk.trim());
+    return chunks;
+};
+
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
-  // 音频解析 API 配置
+  // 强制清除旧缓存体系，应用最新的默认无脑免费配置 (智谱 GLM-4-Flash)
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置
   const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('glm-4-flash');
 
   useEffect(() => {
-    if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
-    if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
-    if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
-    
-    if (localStorage.getItem('wx_text_url_v5')) setTextBaseUrl(localStorage.getItem('wx_text_url_v5'));
-    if (localStorage.getItem('wx_text_key_v5')) setTextKey(localStorage.getItem('wx_text_key_v5'));
-    if (localStorage.getItem('wx_text_model_v5')) setTextModel(localStorage.getItem('wx_text_model_v5'));
+    if (localStorage.getItem('wx_audio_url_v_final')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_final'));
+    if (localStorage.getItem('wx_audio_key_v_final')) setAudioKey(localStorage.getItem('wx_audio_key_v_final'));
+    if (localStorage.getItem('wx_audio_model_v_final')) setAudioModel(localStorage.getItem('wx_audio_model_v_final'));
+    if (localStorage.getItem('wx_text_url_v_final')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_final'));
+    if (localStorage.getItem('wx_text_key_v_final')) setTextKey(localStorage.getItem('wx_text_key_v_final'));
+    if (localStorage.getItem('wx_text_model_v_final')) setTextModel(localStorage.getItem('wx_text_model_v_final'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -118,7 +152,6 @@ export default function App() {
 
   const [sentences, setSentences] = useState([]);
   const [blocks, setBlocks] = useState([]); 
-  
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -148,9 +181,9 @@ export default function App() {
     });
   }, [blocks]);
 
-  // ================= 核心处理逻辑 =================
+  // ================= 核心处理逻辑 (含503阻断与400暴力捕获) =================
   const startProcessing = async () => {
-    if (!formData.audioFile) return alert("请上传音频文件！");
+    if (!formData.audioUrl) return alert("请上传音频文件！");
     if (!audioKey || !textKey) return alert("请完善 API 密钥！");
     
     setIsProcessing(true);
@@ -176,23 +209,19 @@ export default function App() {
         headers: { 'Authorization': `Bearer ${audioKey}` },
         body: audioData
       }).catch(err => {
-          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请检查您的网络连接或代理设置。");
+          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请检查代理设置或接口服务。");
       });
 
       if (!whisperRes.ok) {
-          let errText = whisperRes.statusText;
-          try {
-              const errJson = await whisperRes.json();
-              errText = errJson.error?.message || errText;
-          } catch(e) {}
           if (whisperRes.status === 503) {
-              throw new Error("503 Service Unavailable: Groq 解析服务器当前崩溃或过载宕机，触发了跨域阻断。建议稍后再试，或更换其他 Whisper API 节点。");
+              throw new Error("503 Service Unavailable: 解析服务器目前崩溃宕机或过载，请稍后再试或更换节点。");
           }
+          let errText = whisperRes.statusText;
+          try { const errJson = await whisperRes.json(); errText = errJson.error?.message || errText; } catch(e) {}
           throw new Error(`Whisper 识别失败 (${whisperRes.status}): ${errText}`);
       }
       
       const whisperResult = await whisperRes.json();
-      
       let allWords = [];
       if (whisperResult.words && whisperResult.words.length > 0) {
           allWords = whisperResult.words;
@@ -212,68 +241,16 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      setProcessMsg("正在智能合成整句并划定显示切片...");
-      let parsedSentences = [];
-      let currentSentence = { id: 0, blockId: 'block-0', zh: "", en: "", enChunks: [] };
-      let currentChunk = { id: 0, start: null, end: null, words: [] };
-      let chunkIdCounter = 0;
-
-      allWords.forEach((wObj, idx) => {
-          const w = wObj.word.trim();
-          if (!w) return;
-
-          if (currentChunk.start === null) currentChunk.start = wObj.start;
-          currentChunk.end = wObj.end;
-          currentChunk.words.push(w);
-
-          const isLastWordOverall = idx === allWords.length - 1;
-          const chunkWordCount = currentChunk.words.length;
-          const remainingWords = allWords.length - 1 - idx;
-          const nextWordGap = (idx < allWords.length - 1) ? (allWords[idx+1].start - wObj.end) : 0;
-          
-          const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
-          
-          const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
-          const hasWeak = /[,;，；]['"]*$/.test(w);
-
-          const isParagraphBreak = /\n/.test(wObj.word) || nextWordGap > 1.5 || (hasStrong && nextWordGap > 0.5);
-
-          let splitChunk = false;
-          let splitSentence = false;
-
-          if (isLastWordOverall || isParagraphBreak) {
-              splitChunk = true;
-              splitSentence = true;
-          } else if (hasStrong && remainingWords >= 3) {
-              splitChunk = true;
-              splitSentence = true;
-          } else if (chunkWordCount >= 20) {
-              splitChunk = true; 
-          } else if (hasWeak && chunkWordCount >= 10 && remainingWords >= 3) {
-              splitChunk = true; 
-          }
-
-          if (splitChunk) {
-              currentChunk.en = currentChunk.words.join(" ");
-              currentSentence.enChunks.push({ ...currentChunk });
-              currentChunk = { id: ++chunkIdCounter, start: null, end: null, words: [] };
-          }
-
-          if (splitSentence) {
-              currentSentence.en = currentSentence.enChunks.map(c => c.en).join(" ");
-              parsedSentences.push({ ...currentSentence });
-              currentSentence = { id: parsedSentences.length, blockId: 'block-0', zh: "", en: "", enChunks: [] };
-          }
-      });
+      setProcessMsg("2. 正在应用断句排版引擎划分媒体区...");
+      const parsedSentences = buildSubtitleStructures(allWords, formData.rawText);
 
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
-      
       const chunkSize = 15; 
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
-        setProcessMsg(`3. 结合上下文翻译中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
+        setProcessMsg(`3. LLM 双语意译同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
@@ -281,8 +258,7 @@ export default function App() {
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
         2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文).
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
-        4. CRITICAL: You MUST translate EVERY SINGLE sentence provided. Return EXACTLY ${chunk.length} items mapping exactly to the input "id".
-        5. CONTEXTUAL TRANSLATION: Understand the full context of the paragraph. Ensure the Chinese translation represents the complete grammatical meaning of the sentence.
+        4. CRITICAL: You MUST translate EVERY SINGLE sentence provided. Return EXACTLY ${chunk.length} items mapping exactly to the input "id". Ensure contextual flow.
 
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 1000) : "None."}
         INPUT JSON: ${JSON.stringify(chunk.map(c => ({ id: c.id, en: c.en })))}
@@ -317,72 +293,58 @@ export default function App() {
                     errMsg = errJson.error?.message || errJson.message || errRaw;
                 } catch (e) {}
                 
-                if (llmRes.status === 429) {
-                    throw new Error("429");
-                } else if (llmRes.status === 403) {
-                    throw new Error(`403 权限受限: 该模型为付费专属或无权限访问。原文: ${errMsg}`);
-                } else if (llmRes.status === 404) {
-                    throw new Error(`404 模型未找到: 请检查您的 Model 或 Base URL。原文: ${errMsg}`);
-                } else if (llmRes.status === 402) {
-                    throw new Error(`402 余额不足: 请检查 API 账号额度。原文: ${errMsg}`);
-                } else if (llmRes.status === 401) {
-                    throw new Error(`401 鉴权失败: API Key 无效。原文: ${errMsg}`);
-                } else {
-                    throw new Error(`${llmRes.status} 服务器报错: ${errMsg}`);
-                }
+                if (llmRes.status === 429) throw new Error("429");
+                if (llmRes.status === 400) throw new Error(`400 格式要求拒绝: ${errMsg}`);
+                if (llmRes.status === 401) throw new Error(`401 鉴权失败/Key无效: ${errMsg}`);
+                if (llmRes.status === 402) throw new Error(`402 账号余额不足: ${errMsg}`);
+                if (llmRes.status === 403) throw new Error(`403 无访问权限: ${errMsg}`);
+                if (llmRes.status === 404) throw new Error(`404 模型不存在: ${errMsg}`);
+                throw new Error(`${llmRes.status} 服务器内部报错: ${errMsg}`);
             }
             
             const llmResult = await llmRes.json();
             const content = llmResult.choices[0].message.content;
             
             const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。原始返回: ${content.substring(0,50)}...`);
+            if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。原始片段: ${content.substring(0,50)}`);
             
             const parsed = JSON.parse(jsonMatch[0]);
             const transDict = {};
             (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
             
             chunk.forEach(sent => {
-                sent.zh = transDict[sent.id] || "（大模型未返回此段翻译）";
+                sent.zh = transDict[sent.id] || "（防漏译：大模型未生成此句中文，请手动补全）";
             });
 
             if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
             chunkSuccess = true;
 
           } catch (e) {
-            console.error("当前批次翻译异常:", e);
-            
+            console.error("翻译异常:", e);
             if (e.message === "429") {
                 retryCount++;
-                setProcessMsg(`大模型接口繁忙 (429限流)，等待 ${retryCount * 5} 秒后自动重试...`);
+                setProcessMsg(`触发 429 限流保护，等待 ${retryCount * 5} 秒后自动重试...`);
                 await delay(5000 * retryCount);
                 continue;
             }
-            
             let displayError = e.message;
-            if (e.name === "TypeError" && e.message.includes("fetch")) {
-                displayError = "网络断开或跨域拦截，请检查网络或关闭全局代理限制";
-            }
+            if (e.name === "TypeError" && e.message.includes("fetch")) displayError = "跨域拦截或网络断开";
             
             if (retryCount >= maxRetries - 1) {
-                chunk.forEach(sent => { sent.zh = `【请求失败】${displayError}`; });
+                chunk.forEach(sent => { sent.zh = `【严重异常】${displayError}`; });
                 break;
             }
             retryCount++;
-            setProcessMsg(`翻译异常 [${displayError}]，正在重试 (${retryCount}/${maxRetries})...`);
+            setProcessMsg(`请求受阻 [${displayError}]，尝试重新唤醒通道 (${retryCount}/${maxRetries})...`);
             await delay(3000);
           }
         }
-        
-        if (i + chunkSize < parsedSentences.length) {
-            await delay(2000);
-        }
+        if (i + chunkSize < parsedSentences.length) await delay(2000);
       }
 
       setNewsDate(extractedDateStr || getFormattedDate());
-
-      setProcessMsg("4. 正在装载双轨媒体池...");
-      setBlocks([{ id: 'block-0', title: '新闻开场 (Intro)', image: "" }]);
+      setProcessMsg("4. 装载双轨媒体池与防跳动网格...");
+      setBlocks([{ id: 'block-0', title: '新闻内容段落 1', image: "" }]);
 
       setTimeout(() => {
         setSentences(parsedSentences);
@@ -392,25 +354,24 @@ export default function App() {
 
     } catch (error) {
       console.error("处理失败:", error);
-      alert(`合成失败！\n\n【错误详情】:\n${error.message}`);
+      alert(`工作台解析遇阻！\n\n【诊断报告】:\n${error.message}`);
       setIsProcessing(false);
     }
   };
 
-  // ================= 手动区块切分逻辑 =================
   const handleSplitAfter = (sentenceId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
         const newBlocks = [...prev];
-        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `新闻片段 ${newBlocks.length + 1}`, image: "" });
+        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `新闻内容段落 ${newBlocks.length + 1}`, image: "" });
         return newBlocks;
     });
     setSentences(prev => {
-        let passedSplitPoint = false;
+        let passed = false;
         return prev.map(sent => {
-            if (sent.id === sentenceId) { passedSplitPoint = true; return sent; }
-            if (passedSplitPoint && sent.blockId === currentBlockId) return { ...sent, blockId: newBlockId };
+            if (sent.id === sentenceId) { passed = true; return sent; }
+            if (passed && sent.blockId === currentBlockId) return { ...sent, blockId: newBlockId };
             return sent;
         });
     });
@@ -434,41 +395,26 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, image: newBlobUrl } : b));
   };
 
-  const handleRenameBlock = (blockId, newTitle) => {
-    setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
-  };
-
-  // ================= 真正的同步直驱播放防护 (废除 useEffect) =================
+  // ================= 彻底同步防拦截的原生播放系统 =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      
       const audio = audioRef.current;
-      
-      if (!formData.audioUrl) {
-          return alert("请先上传音频文件！");
-      }
+      if (!formData.audioUrl) return alert("请先上传主音频！");
       if (!audio || isExportingVideo) return;
       
       if (!audio.paused) {
-          // 如果正在播放，则暂停并同步状态
           audio.pause();
           setIsPlaying(false);
       } else {
-          // 检查是否到了结尾，如果是，重置到开头
           if (audio.currentTime >= (formData.audioDuration || audio.duration) - 0.1 || audio.ended) {
               audio.currentTime = 0;
               setCurrentTime(0);
           }
-          
-          // 【核心修复点】必须在用户的原生态 Click 交互调用栈里，直接同步调用 play()！
-          // 绝对不能放进 useEffect 异步监听中，否则立刻被 Safari 静音拦截！
           const playPromise = audio.play();
           if (playPromise !== undefined) {
-              playPromise.then(() => {
-                  setIsPlaying(true);
-              }).catch(err => {
-                  console.error("播放被拦截:", err);
-                  alert("播放被浏览器拦截。请确保您已在网页点击任意位置完成交互。");
+              playPromise.then(() => setIsPlaying(true)).catch(err => {
+                  console.error("播放受阻:", err);
+                  alert("由于 Safari 隐私策略，自动播放被阻拦。请在网页上点击任意元素激活权限后再试。");
                   setIsPlaying(false);
               });
           } else {
@@ -480,22 +426,21 @@ export default function App() {
   const handleTimeUpdate = () => { 
       if (audioRef.current && !isExportingVideo) setCurrentTime(audioRef.current.currentTime); 
   };
-  
+
   const handleSeek = (e) => {
     const newTime = parseFloat(e.target.value);
     setCurrentTime(newTime);
     if (audioRef.current) audioRef.current.currentTime = newTime;
   };
-  
   const formatTime = (s) => `${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}.${Math.floor((s%1)*10)}`;
 
   const handleExportSRT = () => {
     let srt = "";
     let srtIdx = 1;
     sentences.forEach(sent => {
-        if (!sent.enChunks || sent.enChunks.length === 0) return;
-        const start = sent.enChunks[0].start;
-        const end = sent.enChunks[sent.enChunks.length - 1].end;
+        if (!sent.chunks || sent.chunks.length === 0) return;
+        const start = sent.chunks[0].start;
+        const end = sent.chunks[sent.chunks.length - 1].end;
         const pad = (n, s) => ('000'+n).slice(s*-1);
         const fmt = (sec) => `${pad(Math.floor(sec/3600),2)}:${pad(Math.floor((sec%3600)/60),2)}:${pad(Math.floor(sec%60),2)},${pad(Math.floor((sec%1)*1000),3)}`;
         srt += `${srtIdx++}\n${fmt(start)} --> ${fmt(end)}\n${sent.en}\n${sent.zh}\n\n`;
@@ -506,7 +451,7 @@ export default function App() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  // ================= 视频实时渲染导出 =================
+  // ================= 兼容 Mac 原生硬件 Canvas 的视频渲染引擎 =================
   const wrapTextCanvas = (ctx, text, x, y, maxWidth, lineHeight) => {
       if (!text) return y;
       let line = '';
@@ -515,8 +460,7 @@ export default function App() {
       for (let n = 0; n < tokens.length; n++) {
           const token = tokens[n];
           const testLine = line + token;
-          const metrics = ctx.measureText(testLine);
-          if (metrics.width > maxWidth && n > 0 && token.trim() !== '') {
+          if (ctx.measureText(testLine).width > maxWidth && n > 0 && token.trim() !== '') {
               ctx.fillText(line, x, currentY);
               line = token;
               currentY += lineHeight;
@@ -529,46 +473,29 @@ export default function App() {
   };
 
   const drawRoundRect = (ctx, x, y, w, h, r) => {
-      if (ctx.roundRect) {
-          ctx.beginPath();
-          ctx.roundRect(x, y, w, h, r);
-          ctx.closePath();
-      } else {
-          ctx.beginPath();
-          ctx.moveTo(x + r, y);
-          ctx.lineTo(x + w - r, y);
-          ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-          ctx.lineTo(x + w, y + h - r);
-          ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-          ctx.lineTo(x + r, y + h);
-          ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-          ctx.lineTo(x, y + r);
-          ctx.quadraticCurveTo(x, y, x + r, y);
-          ctx.closePath();
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.closePath(); } else {
+          ctx.beginPath(); ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+          ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h); ctx.lineTo(x+r, y+h);
+          ctx.quadraticCurveTo(x, y+h, x, y+h-r); ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y); ctx.closePath();
       }
   };
 
   const startVideoExport = async () => {
-      if (!formData.audioUrl || sentences.length === 0) return alert("请先上传音频并解析剧本");
+      if (!formData.audioUrl || sentences.length === 0) return alert("请先完成剧本构建。");
       setIsPlaying(false);
       setIsExportingVideo(true);
       setExportProgress(0);
 
       const canvas = exportCanvasRef.current;
       const ctx = canvas.getContext('2d');
-      
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, 1080, 1920);
+      ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 1080, 1920);
 
       let recordedChunks = [];
       let animationId;
       let mediaRecorder;
 
       try {
-          if (!canvas.captureStream) {
-             throw new Error("您的浏览器不支持 Canvas 视频流捕获。请尝试使用最新版 Chrome 浏览器。");
-          }
-
+          if (!canvas.captureStream) throw new Error("当前 Safari 版本不支持流捕获，建议使用 Chrome 导出视频。");
           const canvasStream = canvas.captureStream(30);
           
           const audio = new Audio(formData.audioUrl);
@@ -580,374 +507,231 @@ export default function App() {
           source.connect(dest);
           source.connect(audioCtx.destination); 
           
-          const audioTracks = dest.stream.getAudioTracks();
-          const combinedTracks = [
-              ...canvasStream.getVideoTracks(),
-              ...audioTracks
-          ];
-          const combinedStream = new MediaStream(combinedTracks);
-
-          const supportedMimeTypes = [
-              'video/mp4',
-              'video/webm;codecs=vp9',
-              'video/webm;codecs=vp8',
-              'video/webm',
-              '' 
-          ];
-          
+          const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
+          const supportedMimeTypes = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm', ''];
           let options = {};
           for (let type of supportedMimeTypes) {
               if (type === '' || MediaRecorder.isTypeSupported(type)) {
-                  if (type !== '') options.mimeType = type;
-                  break;
+                  if (type !== '') options.mimeType = type; break;
               }
           }
 
           mediaRecorder = new MediaRecorder(combinedStream, options);
-          
-          mediaRecorder.ondataavailable = (e) => {
-              if (e.data && e.data.size > 0) recordedChunks.push(e.data);
-          };
-          
+          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
           mediaRecorder.onstop = () => {
-              const type = options.mimeType || 'video/mp4';
-              const extension = type.includes('webm') ? 'webm' : 'mp4';
-              const blob = new Blob(recordedChunks, { type });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `${formData.title}_export.${extension}`;
-              a.click();
-              
-              setIsExportingVideo(false);
-              cancelAnimationFrame(animationId);
-              audio.pause();
-              audioCtx.close();
+              const ext = (options.mimeType || '').includes('webm') ? 'webm' : 'mp4';
+              const blob = new Blob(recordedChunks, { type: options.mimeType || 'video/mp4' });
+              const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+              a.download = `KidNuz_Export.${ext}`; a.click();
+              setIsExportingVideo(false); cancelAnimationFrame(animationId); audioCtx.close();
           };
 
           const drawFrame = () => {
               const time = audio.currentTime;
-              setExportProgress(time / audio.duration);
+              setExportProgress(time / (formData.audioDuration || audio.duration));
 
-              ctx.fillStyle = '#000000';
-              ctx.fillRect(0, 0, 1080, 1920);
-
-              ctx.fillStyle = '#ffffff';
-              ctx.font = 'bold 120px sans-serif';
-              ctx.textAlign = 'center';
-              ctx.fillText('KidNuz', 540, 240);
-
-              ctx.fillStyle = '#facc15'; 
-              ctx.font = '500 45px sans-serif';
-              ctx.fillText(newsDate || getFormattedDate(), 540, 320);
+              ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 1080, 1920);
+              
+              // Header
+              ctx.fillStyle = '#ffffff'; ctx.font = 'bold 120px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('KidNuz', 540, 150);
+              ctx.fillStyle = '#facc15'; ctx.font = '500 45px sans-serif'; ctx.fillText(newsDate || getFormattedDate(), 540, 220);
 
               let activeSentence = null;
               let activeChunk = null;
-              let activeZhChunkText = "";
-
               for (let i = 0; i < sentences.length; i++) {
                   const sent = sentences[i];
-                  if (sent.enChunks.length === 0) continue;
-                  const sentStart = sent.enChunks[0].start;
-                  const sentEnd = sent.enChunks[sent.enChunks.length - 1].end;
-                  
-                  if (time >= sentStart && time <= sentEnd) {
+                  if (sent.chunks.length === 0) continue;
+                  if (time >= sent.chunks[0].start && time <= sent.chunks[sent.chunks.length - 1].end) {
                       activeSentence = sent;
-                      activeChunk = sent.enChunks.find(c => time >= c.start && time <= c.end);
-                      
-                      const zhChunksText = splitChineseText(sent.zh);
-                      if (zhChunksText.length > 0) {
-                          const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
-                          const duration = sentEnd - sentStart;
-                          let t = sentStart;
-                          let found = false;
-                          for (let j = 0; j < zhChunksText.length; j++) {
-                              const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
-                              if (time >= t && time <= t + chunkDur) {
-                                  activeZhChunkText = zhChunksText[j];
-                                  found = true; break;
-                              }
-                              t += chunkDur;
-                          }
-                          if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
-                      }
+                      activeChunk = sent.chunks.find(c => time >= c.start && time <= c.end);
                       break;
                   }
               }
 
-              const activeOrLastSentence = activeSentence || sentences.slice().reverse().find(s => s.enChunks && s.enChunks[0] && s.enChunks[0].start <= time) || sentences[0];
+              // 防闪烁逻辑：向上回溯查找最后一次存在的背景图
               let targetImage = "";
-              if (activeOrLastSentence) {
-                  const b = blocks.find(blk => blk.id === activeOrLastSentence.blockId);
-                  if (b) targetImage = b.image;
+              const referenceSentence = activeSentence || sentences.slice().reverse().find(s => s.chunks[0]?.start <= time) || sentences[0];
+              if (referenceSentence) {
+                  const blockIdx = blocks.findIndex(b => b.id === referenceSentence.blockId);
+                  for (let i = blockIdx; i >= 0; i--) {
+                      if (blocks[i] && blocks[i].image) { targetImage = blocks[i].image; break; }
+                  }
               }
 
-              let displayEnChunk = "";
-              if (activeSentence) {
-                  displayEnChunk = activeChunk ? activeChunk.en : activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
-              }
-
-              const imgY = 420;
-              const imgH = 607; 
+              // Area A: 16:9 Image (Top-aligned under header)
+              const imgY = 260; const imgH = 1080 * (9/16); 
               if (targetImage && imageElementCache.current[targetImage]) {
                   ctx.drawImage(imageElementCache.current[targetImage], 0, imgY, 1080, imgH);
               } else {
-                  ctx.fillStyle = '#111827'; 
-                  ctx.fillRect(0, imgY, 1080, imgH);
+                  ctx.fillStyle = '#111827'; ctx.fillRect(0, imgY, 1080, imgH);
               }
 
-              // ================= 视频字幕高度基准渲染计算 =================
+              // Area B: Grid Stacking Subtitles
               if (activeSentence) {
-                  const boxWidth = 960;
-                  const boxX = 60;
-                  const textX = 100;
-                  const textMaxWidth = 880;
-
+                  const displayEn = activeChunk ? activeChunk.en : activeSentence.chunks[activeSentence.chunks.length - 1].en;
+                  const boxWidth = 960; const boxX = 60; const textX = 100; const textMaxWidth = 880;
                   const enBoxY = imgY + imgH + 60;
                   ctx.font = '600 48px sans-serif';
                   
                   let maxEnBoxHeight = 0;
-                  activeSentence.enChunks.forEach(chunk => {
+                  activeSentence.chunks.forEach(c => {
                       let simY = enBoxY + 70;
-                      const tokens = chunk.en.match(/[\w\.\,\!\?\-\']+|\s+/g) || chunk.en.split('');
+                      const tokens = c.en.match(/[\w\.\,\!\?\-\']+|\s+/g) || c.en.split('');
                       let simLine = '';
                       for (let n = 0; n < tokens.length; n++) {
                           const testLine = simLine + tokens[n];
                           if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
-                              simLine = tokens[n];
-                              simY += 65;
-                          } else {
-                              simLine = testLine;
-                          }
+                              simLine = tokens[n]; simY += 65;
+                          } else { simLine = testLine; }
                       }
-                      const h = (simY - enBoxY) + 50;
-                      if (h > maxEnBoxHeight) maxEnBoxHeight = h;
+                      if ((simY - enBoxY) + 50 > maxEnBoxHeight) maxEnBoxHeight = (simY - enBoxY) + 50;
                   });
-                  const enBoxHeight = maxEnBoxHeight;
 
-                  ctx.fillStyle = 'rgba(30, 58, 138, 0.6)'; 
-                  ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
-                  ctx.lineWidth = 3;
-                  drawRoundRect(ctx, boxX, enBoxY, boxWidth, enBoxHeight, 24);
-                  ctx.fill();
-                  ctx.stroke();
+                  ctx.fillStyle = 'rgba(30, 58, 138, 0.6)'; ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)'; ctx.lineWidth = 3;
+                  drawRoundRect(ctx, boxX, enBoxY, boxWidth, maxEnBoxHeight, 24); ctx.fill(); ctx.stroke();
+                  ctx.fillStyle = '#ffffff'; ctx.textAlign = 'left';
+                  wrapTextCanvas(ctx, displayEn, textX, enBoxY + 70, textMaxWidth, 65);
 
-                  ctx.fillStyle = '#ffffff';
-                  ctx.textAlign = 'left';
-                  wrapTextCanvas(ctx, displayEnChunk, textX, enBoxY + 70, textMaxWidth, 65);
-
-                  const zhBoxY = enBoxY + enBoxHeight + 40;
+                  const zhBoxY = enBoxY + maxEnBoxHeight + 40;
                   ctx.font = 'bold 42px sans-serif';
                   let maxZhBoxHeight = 0;
                   const zhChunksList = splitChineseText(activeSentence.zh);
-                  const zhChunksToMeasure = zhChunksList.length > 0 ? zhChunksList : [activeSentence.zh];
-                  
-                  zhChunksToMeasure.forEach(chunk => {
+                  zhChunksList.forEach(chunk => {
                       let zhSimY = zhBoxY + 65;
-                      const zhTokens = chunk.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || chunk.split('');
+                      const zhTokens = chunk.split('');
                       let zhSimLine = '';
                       for (let n = 0; n < zhTokens.length; n++) {
                           const testLine = zhSimLine + zhTokens[n];
-                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
-                              zhSimLine = zhTokens[n];
-                              zhSimY += 60;
-                          } else {
-                              zhSimLine = testLine;
-                          }
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0) {
+                              zhSimLine = zhTokens[n]; zhSimY += 60;
+                          } else { zhSimLine = testLine; }
                       }
-                      const h = (zhSimY - zhBoxY) + 45;
-                      if (h > maxZhBoxHeight) maxZhBoxHeight = h;
+                      if ((zhSimY - zhBoxY) + 45 > maxZhBoxHeight) maxZhBoxHeight = (zhSimY - zhBoxY) + 45;
                   });
-                  const zhBoxHeight = maxZhBoxHeight;
 
-                  ctx.fillStyle = 'rgba(66, 133, 244, 0.9)'; 
-                  ctx.strokeStyle = 'rgba(66, 133, 244, 0.5)';
-                  drawRoundRect(ctx, boxX, zhBoxY, boxWidth, zhBoxHeight, 24);
-                  ctx.fill();
-                  ctx.stroke();
+                  // 根据时间片比例显示对应的中文切片
+                  let activeZh = activeSentence.zh;
+                  if (zhChunksList.length > 0) {
+                      const totalDur = activeSentence.chunks[activeSentence.chunks.length-1].end - activeSentence.chunks[0].start;
+                      let elapsed = time - activeSentence.chunks[0].start;
+                      const idx = Math.min(Math.floor((elapsed / totalDur) * zhChunksList.length), zhChunksList.length - 1);
+                      activeZh = zhChunksList[Math.max(0, idx)];
+                  }
 
+                  ctx.fillStyle = '#4285F4'; ctx.strokeStyle = '#4285F4';
+                  drawRoundRect(ctx, boxX, zhBoxY, boxWidth, maxZhBoxHeight, 24); ctx.fill(); ctx.stroke();
                   ctx.fillStyle = '#ffffff';
-                  wrapTextCanvas(ctx, activeZhChunkText || activeSentence.zh, textX, zhBoxY + 65, textMaxWidth, 60);
+                  wrapTextCanvas(ctx, activeZh, textX, zhBoxY + 65, textMaxWidth, 60);
               }
 
               animationId = requestAnimationFrame(drawFrame);
           };
 
           mediaRecorder.start();
-          audio.play().catch(err => {
-              throw new Error("音频播放被浏览器拦截，请先在页面上点击任意位置后再导出。");
-          });
+          audio.play().catch(() => alert("由于安全机制，音频导出需要您在此页面任意点击后再试。"));
           drawFrame();
-
-          audio.onended = () => {
-              mediaRecorder.stop();
-          };
 
       } catch (e) {
           console.error(e);
-          alert(`导出失败: ${e.message}\n如果持续失败，建议使用 Chrome 浏览器进行视频导出操作。`);
-          setIsExportingVideo(false);
-          cancelAnimationFrame(animationId);
+          alert(`视频导出初始化失败: ${e.message}`);
+          setIsExportingVideo(false); cancelAnimationFrame(animationId);
       }
   };
 
-  // ================= 视图渲染 =================
+  // ================= 纯净的排版渲染 =================
   const renderPhoneScreen = () => {
-    if (isProcessing) {
-      return (
-        <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 text-white p-6">
-          <Loader2 size={40} className="animate-spin text-blue-500 mb-4" />
-          <p className="text-sm font-medium">{processMsg}</p>
-        </div>
-      );
-    }
-
-    if (sentences.length === 0) {
-      return (
-        <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 text-gray-500 p-6 text-center space-y-4">
-          <ImageIcon size={48} className="opacity-50" />
-          <p className="text-sm">上传音频构建剧本，在此处预览双轨全屏播报效果</p>
-        </div>
-      );
-    }
+    if (isProcessing) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-white p-6"><Loader2 size={40} className="animate-spin text-[#4285F4] mb-4" /><p className="text-sm">{processMsg}</p></div>;
+    if (sentences.length === 0) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-gray-500 p-6 text-center"><ImageIcon size={48} className="opacity-50 mb-4" /><p className="text-sm">上传剧本，开启全屏工作流</p></div>;
 
     let activeSentence = null;
     let activeChunk = null;
-    let activeZhChunkText = "";
-    
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
-        if (sent.enChunks.length === 0) continue;
-        const sentStart = sent.enChunks[0].start;
-        const sentEnd = sent.enChunks[sent.enChunks.length - 1].end;
-        
-        if (currentTime >= sentStart && currentTime <= sentEnd) {
+        if (sent.chunks.length === 0) continue;
+        if (currentTime >= sent.chunks[0].start && currentTime <= sent.chunks[sent.chunks.length - 1].end) {
             activeSentence = sent;
-            activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
-            
-            const zhChunksText = splitChineseText(sent.zh);
-            if (zhChunksText.length > 0) {
-                const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
-                const duration = sentEnd - sentStart;
-                let t = sentStart;
-                let found = false;
-                for (let j = 0; j < zhChunksText.length; j++) {
-                    const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
-                    if (currentTime >= t && currentTime <= t + chunkDur) {
-                        activeZhChunkText = zhChunksText[j];
-                        found = true;
-                        break;
-                    }
-                    t += chunkDur;
-                }
-                if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
-            }
+            activeChunk = sent.chunks.find(c => currentTime >= c.start && currentTime <= c.end);
             break;
         }
     }
 
-    const activeOrLastSentence = activeSentence || sentences.slice().reverse().find(s => s.enChunks && s.enChunks[0] && s.enChunks[0].start <= currentTime) || sentences[0];
-    
+    // 图像记忆与防闪烁
     let targetImage = ""; 
-    if (activeOrLastSentence) {
-        const b = blocks.find(blk => blk.id === activeOrLastSentence.blockId);
-        if (b) targetImage = b.image;
-    }
-
-    let displayEnChunk = "";
-    let longestChunkEn = "";
-    
-    if (activeSentence) {
-        longestChunkEn = activeSentence.enChunks.reduce((prev, current) => {
-            return (current.en.length > prev.en.length) ? current : prev;
-        }, { en: "" }).en;
-
-        if (activeChunk) {
-            displayEnChunk = activeChunk.en;
-        } else {
-            displayEnChunk = activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
+    const referenceSentence = activeSentence || sentences.slice().reverse().find(s => s.chunks[0]?.start <= currentTime) || sentences[0];
+    if (referenceSentence) {
+        const blockIdx = blocks.findIndex(b => b.id === referenceSentence.blockId);
+        for (let i = blockIdx; i >= 0; i--) {
+            if (blocks[i] && blocks[i].image) { targetImage = blocks[i].image; break; }
         }
     }
 
+    let longestChunkEn = "";
+    if (activeSentence) {
+        longestChunkEn = activeSentence.chunks.reduce((p, c) => c.en.length > p.en.length ? c : p, { en: "" }).en;
+    }
+
     const zhChunksTextList = activeSentence ? splitChineseText(activeSentence.zh) : [];
-    const activeZhChunkToDisplay = activeZhChunkText || (activeSentence ? activeSentence.zh : "");
+    let activeZh = activeSentence ? activeSentence.zh : "";
+    if (activeSentence && zhChunksTextList.length > 0) {
+        const totalDur = activeSentence.chunks[activeSentence.chunks.length-1].end - activeSentence.chunks[0].start;
+        let elapsed = currentTime - activeSentence.chunks[0].start;
+        const idx = Math.min(Math.floor((elapsed / totalDur) * zhChunksTextList.length), zhChunksTextList.length - 1);
+        activeZh = zhChunksTextList[Math.max(0, idx)];
+    }
 
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={togglePlay}>
-        <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
-          <h1 className="text-4xl font-extrabold tracking-tight mb-2 font-sans">KidNuz</h1>
-          <p className="text-sm font-medium opacity-95 text-yellow-400">{newsDate || getFormattedDate()}</p>
+        {/* Header区 */}
+        <div className="flex-none pt-12 pb-2 flex flex-col items-center justify-center text-white px-6 text-center z-10 shrink-0">
+          <h1 className="text-[28px] font-extrabold tracking-tight mb-0.5 font-sans leading-none">KidNuz</h1>
+          <p className="text-[11px] font-medium opacity-95 text-yellow-400 leading-none">{newsDate || getFormattedDate()}</p>
         </div>
 
-        <div className="flex-1 flex flex-col w-full z-10 overflow-hidden relative">
-          <div className="w-full flex-shrink-0 bg-gray-900 aspect-video flex items-center justify-center border-y border-white/10 relative">
-             {targetImage ? (
-                <CrossfadeImage src={targetImage} />
-             ) : (
-                <div className="text-gray-500 flex flex-col items-center opacity-60">
-                   <ImageIcon size={32} className="mb-2" />
-                   <span className="text-xs">等待人工上传配图</span>
-                </div>
-             )}
-             
-             {!isPlaying && (
-               <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
-                 <div className="bg-black/50 rounded-full p-4 backdrop-blur-md border border-white/20 shadow-2xl flex items-center justify-center">
-                   <Play size={40} fill="currentColor" className="text-white opacity-90 ml-1" />
-                 </div>
-               </div>
-             )}
-          </div>
-          
-          <div className="flex-1 w-full px-5 pt-4 pb-8 overflow-y-auto flex flex-col justify-start space-y-3 relative">
-            {activeSentence ? (
+        {/* 区域 A: 16:9 无边框画面区 */}
+        <div className="w-full shrink-0 relative" style={{ aspectRatio: '16/9' }}>
+           {targetImage ? <CrossfadeImage src={targetImage} /> : <div className="w-full h-full bg-gray-900 flex items-center justify-center"><ImageIcon size={32} className="text-gray-600 opacity-50" /></div>}
+           {!isPlaying && <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none"><div className="bg-black/50 rounded-full p-4 backdrop-blur-md shadow-xl"><Play size={32} fill="currentColor" className="text-white ml-1" /></div></div>}
+        </div>
+        
+        {/* 区域 B: 双轨字幕区 (紧贴图片下方) */}
+        <div className="flex-1 w-full px-4 pt-4 overflow-hidden flex flex-col justify-start">
+            {activeSentence && (
               <>
-                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 grid">
-                  <div className="col-start-1 row-start-1 p-4 opacity-0 pointer-events-none select-none">
-                    <p className="font-semibold text-lg leading-relaxed text-left">
-                      {longestChunkEn}
-                    </p>
+                {/* 英文高度锚定层 */}
+                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 grid">
+                  <div className="col-start-1 row-start-1 p-3.5 opacity-0 pointer-events-none select-none">
+                    <p className="font-semibold text-[17px] leading-[1.4] text-left">{longestChunkEn}</p>
                   </div>
-                  {activeSentence.enChunks.map((chunk, cIdx) => (
-                    <div key={chunk.id || cIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${displayEnChunk === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
-                      <p className="text-white font-semibold text-lg leading-relaxed text-left">
-                        {chunk.en}
-                      </p>
-                    </div>
-                  ))}
+                  {activeSentence.chunks.map((chunk, cIdx) => {
+                    const displayEn = activeChunk ? activeChunk.en : activeSentence.chunks[activeSentence.chunks.length - 1].en;
+                    return (
+                      <div key={chunk.id} className={`col-start-1 row-start-1 p-3.5 transition-opacity duration-200 ${displayEn === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                        <p className="text-white font-semibold text-[17px] leading-[1.4] text-left">{chunk.en}</p>
+                      </div>
+                    )
+                  })}
                 </div>
 
-                <div className="w-full bg-[#4285F4]/90 backdrop-blur-md rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg grid">
+                {/* 中文翻译堆叠层 (Google Blue) */}
+                <div className="w-full bg-[#4285F4] backdrop-blur-md rounded-xl shadow-lg grid mt-3">
                   {zhChunksTextList.length > 0 ? zhChunksTextList.map((zhChunk, zIdx) => (
-                    <div key={zIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${activeZhChunkToDisplay === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
-                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
-                        {zhChunk}
-                      </p>
+                    <div key={zIdx} className={`col-start-1 row-start-1 p-3.5 transition-opacity duration-200 ${activeZh === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                      <p className="text-white font-bold text-[15px] leading-relaxed text-left drop-shadow-sm">{zhChunk}</p>
                     </div>
                   )) : (
-                    <div className="col-start-1 row-start-1 p-4 flex items-start justify-start opacity-100 z-10">
-                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
-                        {activeSentence.zh}
-                      </p>
+                    <div className="col-start-1 row-start-1 p-3.5 opacity-100 z-10">
+                      <p className="text-white font-bold text-[15px] leading-relaxed text-left drop-shadow-sm">{activeSentence.zh}</p>
                     </div>
                   )}
                 </div>
               </>
-            ) : null}
-          </div>
+            )}
         </div>
 
-        <div className="absolute bottom-0 left-0 right-0 h-2 bg-gray-800 z-50 group" onClick={(e) => e.stopPropagation()}>
-          <div className="h-full bg-yellow-400 transition-all duration-100 ease-linear pointer-events-none" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
-          <input 
-            type="range"
-            min="0"
-            max={formData.audioDuration || 1}
-            step="0.01"
-            value={currentTime}
-            onChange={handleSeek}
-            className="absolute inset-0 w-full h-6 -top-2 opacity-0 cursor-pointer z-10"
-          />
+        {/* 底部进度条 */}
+        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-50 group" onClick={e => e.stopPropagation()}>
+          <div className="h-full bg-yellow-400 ease-linear pointer-events-none" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
+          <input type="range" min="0" max={formData.audioDuration || 1} step="0.01" value={currentTime} onChange={handleSeek} className="absolute inset-0 w-full h-4 -top-1 opacity-0 cursor-pointer z-10" />
         </div>
       </div>
     );
@@ -957,59 +741,56 @@ export default function App() {
     if (sentences.length === 0) {
       return (
         <div className="flex-1 overflow-y-auto bg-gray-50 flex flex-col">
-          <div className="p-8 max-w-3xl mx-auto w-full space-y-8 flex-1">
+          <div className="p-8 max-w-3xl mx-auto w-full space-y-6 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">支持独立双轨时间轴，整句无损翻译，无初始配图纯净流。</p>
+              <p className="text-sm text-gray-500 mt-2">完全剥离苹果缓存干预的高配直驱版。</p>
             </div>
             
-            <div className="grid grid-cols-2 gap-6">
-              <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
-                <label className="text-sm font-bold text-gray-800 flex items-center"><Mic size={16} className="mr-2 text-blue-500" />Whisper 语音解析接口</label>
-                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
+                <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 节点</label>
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_final', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
-                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
 
-              <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
-                <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v5', e.target.value); }} placeholder="例如: https://open.bigmodel.cn/api/paas/v4" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+              <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
+                <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译引擎 (智谱免翻墙)</label>
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_final', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
             </div>
 
-            <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-6">
+            <div className="bg-white p-5 rounded-xl border shadow-sm space-y-4">
               <div>
-                <label className="text-sm font-bold text-gray-800 mb-2 block">1. 上传主音频 (必须)</label>
-                <div className="border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 hover:bg-gray-100 p-8 flex flex-col items-center relative overflow-hidden transition-colors">
+                <label className="text-sm font-bold block mb-2">1. 挂载主播报音频</label>
+                <div className="border border-dashed border-gray-300 rounded-lg bg-gray-50 hover:bg-gray-100 p-6 flex flex-col items-center relative overflow-hidden transition-colors">
                   {formData.audioName ? 
-                    <div className="text-center"><FileAudio size={40} className="text-blue-500 mx-auto mb-3" /><p className="font-medium text-gray-700">{formData.audioName}</p></div> : 
-                    <div className="text-center text-gray-500"><Upload size={40} className="mx-auto mb-3 text-gray-400" /><p>点击此处上传播报音频 (MP3/WAV)</p></div>
+                    <div className="text-center"><FileAudio size={32} className="text-[#4285F4] mx-auto mb-2" /><p className="font-medium text-xs text-gray-700">{formData.audioName}</p></div> : 
+                    <div className="text-center text-gray-500"><Upload size={32} className="mx-auto mb-2 text-gray-400" /><p className="text-xs">点击此处加载音频文件</p></div>
                   }
                   <input type="file" accept="audio/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => {
                     const file = e.target.files[0];
-                    if (file) { 
-                        const url = URL.createObjectURL(file); 
-                        setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: url})); 
-                    }
+                    if (file) { setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: URL.createObjectURL(file)})); }
                   }} />
                 </div>
               </div>
 
               <div>
-                <label className="text-sm font-bold text-gray-800 mb-2 block">2. 粘贴参考原稿 (用于纠错及提取日期)</label>
-                <textarea className="w-full h-24 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="在此粘贴原版英文文本..."></textarea>
+                <label className="text-sm font-bold block mb-2">2. 粘贴原文字幕结构段</label>
+                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文供大模型划分新闻1、新闻2及提取日期..."></textarea>
               </div>
             </div>
             
-            <button onClick={startProcessing} disabled={isProcessing} className="w-full bg-black text-white rounded-xl py-4 font-bold text-lg hover:bg-gray-800 transition-all shadow-lg flex items-center justify-center disabled:opacity-50">
-              {isProcessing ? <Loader2 className="animate-spin mr-2" /> : <Play className="mr-2" size={20} />}
-              {isProcessing ? "处理中..." : "开始解析与构建项目"}
+            <button onClick={startProcessing} disabled={isProcessing} className="w-full bg-[#4285F4] text-white rounded-xl py-3.5 font-bold text-base hover:bg-blue-600 transition-all shadow flex items-center justify-center disabled:opacity-50">
+              {isProcessing ? <Loader2 className="animate-spin mr-2" size={18} /> : <Play className="mr-2" size={18} />}
+              {isProcessing ? "合成引掣运转中..." : "启动无损切片解析"}
             </button>
           </div>
         </div>
@@ -1017,97 +798,78 @@ export default function App() {
     }
 
     return (
-      <div className="flex-1 flex flex-col bg-gray-100 relative overflow-hidden">
-        <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center space-x-4 shrink-0 shadow-sm z-10">
-           <button onClick={togglePlay} className="w-12 h-12 rounded-full bg-blue-600 flex justify-center items-center hover:bg-blue-500 text-white shrink-0 shadow-md">
-             {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" className="ml-1" />}
+      <div className="flex-1 flex flex-col bg-gray-50 relative overflow-hidden">
+        <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center space-x-4 shrink-0 shadow-sm z-10">
+           <button onClick={togglePlay} className="w-10 h-10 rounded-full bg-[#4285F4] flex justify-center items-center hover:bg-blue-600 text-white shrink-0 shadow">
+             {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
            </button>
-           <div className="flex-1 space-y-1.5">
-             <input type="range" min="0" max={formData.audioDuration || 1} step="0.01" value={currentTime} onChange={handleSeek} className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-blue-600" />
-             <div className="flex justify-between text-xs text-gray-500 font-mono font-medium">
+           <div className="flex-1 space-y-1">
+             <input type="range" min="0" max={formData.audioDuration || 1} step="0.01" value={currentTime} onChange={handleSeek} className="w-full h-1.5 bg-gray-200 rounded-full appearance-none cursor-pointer accent-[#4285F4]" />
+             <div className="flex justify-between text-[10px] text-gray-500 font-mono font-medium">
                <span>{formatTime(currentTime)}</span><span>{formData.audioDuration ? formatTime(formData.audioDuration) : '00:00.0'}</span>
              </div>
            </div>
            
            <div className="flex items-center space-x-2">
-               <button onClick={handleExportSRT} className="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md">
-                <Download size={16} className="mr-2" /> 导出 SRT
+               <button onClick={handleExportSRT} className="bg-gray-800 hover:bg-gray-900 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center shadow-sm">
+                <Download size={14} className="mr-1.5" /> SRT
               </button>
-              <button onClick={startVideoExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md transition-colors">
-                <Video size={16} className="mr-2" /> 导出成品视频
+              <button onClick={startVideoExport} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center shadow-sm transition-colors">
+                <Video size={14} className="mr-1.5" /> 导出视频
               </button>
            </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
+        <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
           {blocks.map((block, bIdx) => {
             const blockSentences = sentences.filter(s => s.blockId === block.id);
             if (blockSentences.length === 0) return null; 
             
             return (
-              <div key={block.id} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col 2xl:flex-row">
-                 <div className="w-full 2xl:w-[320px] bg-gray-50 border-b 2xl:border-b-0 2xl:border-r border-gray-200 p-5 flex flex-col shrink-0">
-                    <div className="flex items-center justify-between mb-4">
-                       <input 
-                         type="text" 
-                         value={block.title} 
-                         onChange={(e) => handleRenameBlock(block.id, e.target.value)} 
-                         className="font-bold text-lg text-gray-800 bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 outline-none w-2/3 px-1"
-                       />
-                       {bIdx > 0 && (
-                         <button onClick={() => handleMergeUp(block.id)} title="与上个新闻合并" className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-                           <ArrowUp size={18} />
-                         </button>
-                       )}
+              <div key={block.id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col xl:flex-row">
+                 <div className="w-full xl:w-[280px] bg-gray-50 border-b xl:border-b-0 xl:border-r border-gray-200 p-4 flex flex-col shrink-0">
+                    <div className="flex items-center justify-between mb-3">
+                       <input type="text" value={block.title} onChange={(e) => handleRenameBlock(block.id, e.target.value)} className="font-bold text-sm text-gray-800 bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 outline-none w-2/3 px-1" />
+                       {bIdx > 0 && <button onClick={() => handleMergeUp(block.id)} title="与上合并" className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded"><ArrowUp size={14} /></button>}
                     </div>
-                    <div className="w-full aspect-video bg-black rounded-lg overflow-hidden relative shadow-inner border border-gray-200 mb-4 flex items-center justify-center group">
-                       {block.image ? (
-                          <img src={block.image} className="w-full h-full object-cover" alt="Block Cover" />
-                       ) : (
-                          <div className="text-gray-500 flex flex-col items-center">
-                            <ImageIcon size={28} className="mb-1 opacity-50" />
-                            <span className="text-xs">该片段暂无图片</span>
-                          </div>
-                       )}
-                       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                          <span className="text-white font-medium text-sm drop-shadow-md">点击下方上传</span>
-                       </div>
+                    <div className="w-full aspect-video bg-black rounded overflow-hidden relative shadow-inner border border-gray-200 mb-3 flex items-center justify-center group">
+                       {block.image ? <img src={block.image} className="w-full h-full object-cover" alt="Block Cover" /> : <div className="text-gray-500 flex flex-col items-center"><ImageIcon size={24} className="mb-1 opacity-50" /><span className="text-[10px]">画面媒体位</span></div>}
+                       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none"><span className="text-white font-medium text-xs drop-shadow">点击重置画面</span></div>
                     </div>
-                    <label className="w-full flex items-center justify-center bg-white border border-gray-300 text-gray-700 hover:text-blue-600 hover:border-blue-400 py-2.5 rounded-xl cursor-pointer text-sm font-semibold transition-colors shadow-sm">
-                       <ImagePlus size={16} className="mr-2" /> 上传片段专属配图
+                    <label className="w-full flex items-center justify-center bg-white border border-gray-300 text-gray-700 hover:text-blue-600 hover:border-blue-400 py-1.5 rounded-lg cursor-pointer text-xs font-semibold shadow-sm transition-colors">
+                       <ImagePlus size={14} className="mr-1.5" /> 上传/替换场景图
                        <input type="file" accept="image/*" className="hidden" onChange={(e)=>handleReplaceBlockImage(block.id, e.target.files[0])} />
                     </label>
                  </div>
                  
-                 <div className="flex-1 p-5 bg-white max-h-[500px] overflow-y-auto space-y-4 relative">
+                 <div className="flex-1 p-4 bg-white max-h-[450px] overflow-y-auto space-y-3 relative">
                     {blockSentences.map((sent, sIdx) => {
                        const sentIdx = sentences.findIndex(s => s.id === sent.id);
                        const isLastOverall = sentIdx === sentences.length - 1;
-                       
-                       const isSentenceActive = sent.enChunks.some(c => currentTime >= c.start && currentTime <= c.end);
+                       const isSentenceActive = sent.chunks.some(c => currentTime >= c.start && currentTime <= c.end);
 
                        return (
                           <div key={sent.id}>
-                            <div className={`rounded-xl border transition-all duration-200 ${isSentenceActive ? 'border-sky-400 bg-sky-50/20 shadow-md ring-1 ring-sky-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                            <div className={`rounded-lg border transition-all duration-200 ${isSentenceActive ? 'border-sky-400 bg-sky-50/20 shadow-md ring-1 ring-sky-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
                               
-                              <div className={`px-4 py-2 border-b flex flex-col rounded-t-xl ${isSentenceActive ? 'bg-sky-100/40 border-sky-200' : 'bg-gray-50 border-gray-100'}`}>
+                              <div className={`px-3 py-2 border-b flex flex-col rounded-t-lg ${isSentenceActive ? 'bg-sky-100/40 border-sky-200' : 'bg-gray-50 border-gray-100'}`}>
                                 <div className="flex justify-between items-center mb-1">
-                                    <span className="text-xs font-bold text-gray-500">完整句意翻译 (预览时自动切片滚动)</span>
+                                    <span className="text-[10px] font-bold text-[#4285F4]">中文统译轨道 (对应下方全组切片)</span>
                                 </div>
-                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-sm font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[40px]" placeholder="请输入整句翻译..." />
+                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-xs font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[30px]" placeholder="等待智谱引擎接入中文意译..." />
                               </div>
 
-                              <div className="p-3 space-y-2">
-                                <div className="text-[10px] font-bold text-gray-400 mb-1">英文分切轴 (精确对齐)</div>
-                                {sent.enChunks.map((chunk, cIdx) => {
+                              <div className="p-2 space-y-1.5">
+                                <div className="text-[9px] font-bold text-gray-400">英文 20 词强制切分轴</div>
+                                {sent.chunks.map((chunk, cIdx) => {
                                     const isChunkActive = currentTime >= chunk.start && currentTime <= chunk.end;
                                     return (
-                                        <div key={chunk.id} className={`flex items-start space-x-2 rounded-lg p-2 border ${isChunkActive ? 'border-blue-400 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}>
-                                            <div className="flex flex-col space-y-1 w-14 shrink-0">
-                                                <input type="number" step="0.1" value={chunk.start.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].start=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[10px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
-                                                <input type="number" step="0.1" value={chunk.end.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].end=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[10px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                        <div key={chunk.id} className={`flex items-start space-x-2 rounded p-1.5 border ${isChunkActive ? 'border-blue-400 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}>
+                                            <div className="flex flex-col space-y-1 w-12 shrink-0">
+                                                <input type="number" step="0.1" value={chunk.start.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].start=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[9px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                                <input type="number" step="0.1" value={chunk.end.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].end=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[9px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
                                             </div>
-                                            <textarea value={chunk.en} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].en=e.target.value; n[sentIdx].en = n[sentIdx].enChunks.map(c=>c.en).join(" "); setSentences(n); }} className="flex-1 text-xs font-medium text-gray-700 bg-transparent outline-none resize-none h-[40px]" />
+                                            <textarea value={chunk.en} onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].en=e.target.value; n[sentIdx].en = n[sentIdx].chunks.map(c=>c.en).join(" "); setSentences(n); }} className="flex-1 text-[11px] font-medium text-gray-700 bg-transparent outline-none resize-none h-[30px]" />
                                         </div>
                                     )
                                 })}
@@ -1116,10 +878,10 @@ export default function App() {
                             </div>
 
                             {!isLastOverall && (
-                              <div className="flex justify-center my-2 relative group py-1">
+                              <div className="flex justify-center my-1 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
-                                <button onClick={() => handleSplitAfter(sent.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-blue-600 group-hover:border-blue-400 group-hover:shadow-sm text-xs px-3 py-1 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
-                                  <Scissors size={12} className="mr-1.5" /> 在此向下拆分新片段
+                                <button onClick={() => handleSplitAfter(sent.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-[#4285F4] group-hover:border-blue-400 group-hover:shadow-sm text-[10px] px-2 py-0.5 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
+                                  <Scissors size={10} className="mr-1" /> 在此向下切分段落 (News Block)
                                 </button>
                               </div>
                             )}
@@ -1137,6 +899,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
+      {/* 隐形真理锚点：唯一被允许发声的宿主，杜绝在 React Lifecycle 里被销毁重置 */}
       <audio 
         ref={audioRef} 
         src={formData.audioUrl} 
@@ -1145,13 +908,11 @@ export default function App() {
         onEnded={() => setIsPlaying(false)}
         onPause={() => setIsPlaying(false)}
         onPlay={() => setIsPlaying(true)}
-        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none', display: 'block' }}
       />
       
-      {/* 隐藏的离屏 Canvas 用于视频渲染导出 */}
       <canvas ref={exportCanvasRef} width={1080} height={1920} className="hidden pointer-events-none" />
 
-      {/* 视频导出进度遮罩 */}
       {isExportingVideo && (
         <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center text-white backdrop-blur-sm">
             <Loader2 size={64} className="animate-spin text-green-500 mb-6" />
@@ -1164,10 +925,10 @@ export default function App() {
         </div>
       )}
 
-      {/* ================= 左侧：模拟手机实时预览区域 ================= */}
+      {/* Preview 区 */}
       <div className="w-[450px] h-full p-8 flex flex-col items-center justify-center shrink-0 border-r border-white/10 bg-black/40 relative">
          <div className="absolute top-6 left-8 text-white/50 text-xs font-bold tracking-widest flex items-center">
-            <Eye size={14} className="mr-2" /> LIVE PREVIEW
+            <Eye size={14} className="mr-2" /> LIVE PREVIEW (16:9 顶吸版)
          </div>
          <div className="w-[375px] h-[812px] bg-black rounded-[3rem] border-[14px] border-gray-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden flex flex-col ring-1 ring-white/10">
             <div className="absolute top-0 inset-x-0 h-6 bg-gray-800 rounded-b-2xl w-1/2 mx-auto z-50"></div>
@@ -1175,7 +936,7 @@ export default function App() {
          </div>
       </div>
 
-      {/* ================= 右侧：宽屏工作台区域 ================= */}
+      {/* Workspace 区 */}
       <div className="flex-1 flex flex-col h-full bg-white relative overflow-hidden">
          {renderWorkspace()}
       </div>
