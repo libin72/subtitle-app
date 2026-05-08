@@ -87,23 +87,25 @@ const splitChineseText = (text) => {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
-  // API 配置
+  // 音频解析 API 配置 (保留原来的)
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 默认切换为 Google Gemini 免费接口 (OpenAI 兼容模式)
-  const [textBaseUrl, setTextBaseUrl] = useState('https://generativelanguage.googleapis.com/v1beta/openai/');
+  // 文本翻译 API 配置 -> 默认切换为 SiliconFlow (国内免代理，速度极快)
+  const [textBaseUrl, setTextBaseUrl] = useState('https://api.siliconflow.cn/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('gemini-1.5-flash');
+  const [textModel, setTextModel] = useState('Qwen/Qwen2.5-72B-Instruct');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
-    if (localStorage.getItem('wx_text_url')) setTextBaseUrl(localStorage.getItem('wx_text_url'));
-    if (localStorage.getItem('wx_text_key')) setTextKey(localStorage.getItem('wx_text_key'));
-    if (localStorage.getItem('wx_text_model')) setTextModel(localStorage.getItem('wx_text_model'));
+    
+    // 使用 _v2 后缀绕过旧缓存，强制应用正确的默认值，防止 404
+    if (localStorage.getItem('wx_text_url_v2')) setTextBaseUrl(localStorage.getItem('wx_text_url_v2'));
+    if (localStorage.getItem('wx_text_key_v2')) setTextKey(localStorage.getItem('wx_text_key_v2'));
+    if (localStorage.getItem('wx_text_model_v2')) setTextModel(localStorage.getItem('wx_text_model_v2'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -258,7 +260,6 @@ export default function App() {
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
-        // 移除强制的 response_format，全靠 Prompt 强引导，提升在 DeepSeek 上的容错率
         const translationPrompt = `You are a professional subtitle translator.
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
         2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文).
@@ -291,19 +292,18 @@ export default function App() {
               })
             });
 
-            // 精准错误抛出与拦截，不再一刀切报“网络错误”
             if (!llmRes.ok) {
                 const errorData = await llmRes.json().catch(() => ({}));
                 const errMsg = errorData.error?.message || llmRes.statusText;
                 
                 if (llmRes.status === 429) {
-                    throw new Error("429"); // 特殊标识，用于触发退避延时重试
+                    throw new Error("429");
+                } else if (llmRes.status === 404) {
+                    throw new Error(`404 模型未找到: 请检查您的 Model 名称是否拼写正确，或者 Base URL 是否匹配该模型。`);
                 } else if (llmRes.status === 402) {
-                    throw new Error(`402 余额不足: 您的 API Key 已欠费，请前往充值`);
-                } else if (llmRes.status === 400) {
-                    throw new Error(`400 格式校验拒绝: ${errMsg}`);
+                    throw new Error(`402 余额不足: 请检查 API 账号额度`);
                 } else if (llmRes.status === 401) {
-                    throw new Error(`401 鉴权失败: API Key 无效或填写错误`);
+                    throw new Error(`401 鉴权失败: API Key 无效`);
                 } else {
                     throw new Error(`${llmRes.status} 服务器报错: ${errMsg}`);
                 }
@@ -312,7 +312,6 @@ export default function App() {
             const llmResult = await llmRes.json();
             const content = llmResult.choices[0].message.content;
             
-            // 安全使用正则提取 JSON 结构，兼容所有大模型的冗余回复字符
             const jsonMatch = content.match(/\{[\s\S]*\}/);
             if (!jsonMatch) throw new Error("大模型未返回有效的 JSON 结构");
             
@@ -330,7 +329,6 @@ export default function App() {
           } catch (e) {
             console.error("当前批次翻译异常:", e);
             
-            // 处理限流退避
             if (e.message === "429") {
                 retryCount++;
                 setProcessMsg(`大模型接口繁忙 (429限流)，等待 ${retryCount * 5} 秒后自动重试...`);
@@ -338,14 +336,12 @@ export default function App() {
                 continue;
             }
             
-            // 细分显示真实错误
             let displayError = e.message;
             if (e.name === "TypeError" && e.message.includes("fetch")) {
-                displayError = "浏览器 CORS 跨域拦截 或 网络断开";
+                displayError = "网络断开或跨域拦截，请检查代理";
             }
             
             if (retryCount >= maxRetries - 1) {
-                // 重试用尽，将报错注入到界面供用户识别
                 chunk.forEach(sent => { sent.zh = `【请求失败】${displayError}`; });
                 break;
             }
@@ -355,7 +351,6 @@ export default function App() {
           }
         }
         
-        // 每个批次成功后，主动延时2秒，温柔保护大模型 API 防限流
         if (i + chunkSize < parsedSentences.length) {
             await delay(2000);
         }
@@ -455,7 +450,7 @@ export default function App() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  // ================= 视频实时渲染导出 (Canvas + MediaRecorder, MacOS 兼容版) =================
+  // ================= 视频实时渲染导出 =================
   const wrapTextCanvas = (ctx, text, x, y, maxWidth, lineHeight) => {
       if (!text) return y;
       let line = '';
@@ -655,7 +650,6 @@ export default function App() {
                   const enBoxY = imgY + imgH + 60;
                   ctx.font = '600 48px sans-serif';
                   
-                  // 遍历英文切片，找到渲染后的实际最大高度
                   let maxEnBoxHeight = 0;
                   activeSentence.enChunks.forEach(chunk => {
                       let simY = enBoxY + 70;
@@ -686,7 +680,6 @@ export default function App() {
                   ctx.textAlign = 'left';
                   wrapTextCanvas(ctx, displayEnChunk, textX, enBoxY + 70, textMaxWidth, 65);
 
-                  // 遍历中文切片，找到最大高度
                   const zhBoxY = enBoxY + enBoxHeight + 40;
                   ctx.font = 'bold 42px sans-serif';
                   let maxZhBoxHeight = 0;
@@ -926,7 +919,7 @@ export default function App() {
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => setTextBaseUrl(e.target.value)} placeholder="例如: https://generativelanguage.googleapis.com/v1beta/openai/" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <input type="text" value={textBaseUrl} onChange={e => setTextBaseUrl(e.target.value)} placeholder="例如: https://api.siliconflow.cn/v1" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
                   <input type="password" placeholder="API Key" value={textKey} onChange={e => setTextKey(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                   <input type="text" placeholder="Model" value={textModel} onChange={e => setTextModel(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
