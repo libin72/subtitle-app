@@ -92,20 +92,20 @@ export default function App() {
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置 -> 默认切换为 SiliconFlow (国内免代理，速度极快)
+  // 文本翻译 API 配置 -> 默认切换为 SiliconFlow 上的 DeepSeek-V3 满血版
   const [textBaseUrl, setTextBaseUrl] = useState('https://api.siliconflow.cn/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('Qwen/Qwen2.5-72B-Instruct');
+  const [textModel, setTextModel] = useState('deepseek-ai/DeepSeek-V3');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
     
-    // 使用 _v2 后缀绕过旧缓存，强制应用正确的默认值，防止 404
-    if (localStorage.getItem('wx_text_url_v2')) setTextBaseUrl(localStorage.getItem('wx_text_url_v2'));
-    if (localStorage.getItem('wx_text_key_v2')) setTextKey(localStorage.getItem('wx_text_key_v2'));
-    if (localStorage.getItem('wx_text_model_v2')) setTextModel(localStorage.getItem('wx_text_model_v2'));
+    // 使用 _v3 后缀绕过旧缓存，强制应用 DeepSeek-V3 默认值
+    if (localStorage.getItem('wx_text_url_v3')) setTextBaseUrl(localStorage.getItem('wx_text_url_v3'));
+    if (localStorage.getItem('wx_text_key_v3')) setTextKey(localStorage.getItem('wx_text_key_v3'));
+    if (localStorage.getItem('wx_text_model_v3')) setTextModel(localStorage.getItem('wx_text_model_v3'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -910,19 +910,19 @@ export default function App() {
             <div className="grid grid-cols-2 gap-6">
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><Mic size={16} className="mr-2 text-blue-500" />Whisper 语音解析接口</label>
-                <input type="text" value={audioBaseUrl} onChange={e => setAudioBaseUrl(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => setAudioKey(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
-                  <input type="text" placeholder="Model" value={audioModel} onChange={e => setAudioModel(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
                 </div>
               </div>
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => setTextBaseUrl(e.target.value)} placeholder="例如: https://api.siliconflow.cn/v1" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v3', e.target.value); }} placeholder="例如: https://api.siliconflow.cn/v1" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => setTextKey(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => setTextModel(e.target.value)} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v3', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v3', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 </div>
               </div>
             </div>
