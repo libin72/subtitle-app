@@ -425,27 +425,34 @@ export default function App() {
   };
 
   // ================= 播放器与辅助功能 =================
+  // 恢复状态守护：确保 UI 的播放状态和底层的音频流绝对同步
+  useEffect(() => {
+    if (audioRef.current && !isExportingVideo) {
+      if (isPlaying) {
+        const p = audioRef.current.play();
+        if (p !== undefined) p.catch(() => {}); 
+      } else {
+        audioRef.current.pause();
+      }
+    }
+  }, [isPlaying, isExportingVideo]);
+
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
       if (!audioRef.current || isExportingVideo) return;
       
       if (isPlaying) {
-          audioRef.current.pause();
           setIsPlaying(false);
       } else {
-          // 必须在同步的用户点击事件中直接调用 play()，否则会被 Safari 等浏览器拦截
-          const playPromise = audioRef.current.play();
-          if (playPromise !== undefined) {
-              playPromise.then(() => {
-                  setIsPlaying(true);
-              }).catch(err => {
-                  console.error("播放被浏览器拦截:", err);
-                  alert("由于浏览器的安全限制，音频播放被拦截，请再次点击尝试。");
-                  setIsPlaying(false);
-              });
-          } else {
-              setIsPlaying(true);
+          // 修复：如果之前已经播放到了最后，再次点击播放时自动重头开始
+          if (audioRef.current.currentTime >= audioRef.current.duration - 0.1 || audioRef.current.ended) {
+              audioRef.current.currentTime = 0;
+              setCurrentTime(0);
           }
+          setIsPlaying(true);
+          // 兼容 Safari：必须在点击事件的同步帧内触发原生 play()，否则会被拦截
+          const p = audioRef.current.play();
+          if (p !== undefined) p.catch(() => {});
       }
   };
 
