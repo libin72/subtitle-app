@@ -92,7 +92,7 @@ export default function App() {
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置 -> 默认切换为智谱 GLM-4-Flash
+  // 文本翻译 API 配置
   const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('glm-4-flash');
@@ -438,27 +438,35 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 终极播放器防护 =================
+  // ================= 彻底重构：React 黄金监听范式的终极播放器防护 =================
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || isExportingVideo) return;
+
+    if (isPlaying) {
+      // 修复自动重置逻辑：使用绝对原生的 duration，防 0 阻塞
+      if (audio.currentTime >= audio.duration - 0.1 || audio.ended) {
+        audio.currentTime = 0;
+        setCurrentTime(0);
+      }
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(err => {
+          console.error("播放被拦截:", err);
+          alert("播放被浏览器拦截。请确保您已在网页任意位置点击交互过。");
+          setIsPlaying(false); // 同步还原 UI 状态
+        });
+      }
+    } else {
+      audio.pause();
+    }
+  }, [isPlaying, isExportingVideo]);
+
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
-      
-      if (!audioRef.current.paused) {
-          audioRef.current.pause();
-      } else {
-          if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
-              audioRef.current.currentTime = 0;
-              setCurrentTime(0);
-          }
-          
-          const playPromise = audioRef.current.play();
-          if (playPromise !== undefined) {
-              playPromise.catch(err => {
-                  console.error("播放被拦截:", err);
-                  alert("播放被浏览器拦截。请确保您已在网页任意位置点击交互过。");
-              });
-          }
-      }
+      if (!audioRef.current || isExportingVideo) return;
+      // 唯一的数据源驱动：只管切换状态，其他的交给上面的 useEffect 自动处理
+      setIsPlaying(prev => !prev);
   };
 
   const handleTimeUpdate = () => { 
@@ -975,9 +983,13 @@ export default function App() {
                     <div className="text-center"><FileAudio size={40} className="text-blue-500 mx-auto mb-3" /><p className="font-medium text-gray-700">{formData.audioName}</p></div> : 
                     <div className="text-center text-gray-500"><Upload size={40} className="mx-auto mb-3 text-gray-400" /><p>点击此处上传播报音频 (MP3/WAV)</p></div>
                   }
+                  {/* 核心修复点：将文件提取改为原生同步，移除无用的 new Audio 后台加载，将 onLoadedMetadata 责任交还给下方的 audio 标签 */}
                   <input type="file" accept="audio/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => {
                     const file = e.target.files[0];
-                    if (file) { const url = URL.createObjectURL(file); const temp = new Audio(url); temp.onloadedmetadata = () => setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: url, audioDuration: temp.duration})); }
+                    if (file) { 
+                        const url = URL.createObjectURL(file); 
+                        setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: url})); 
+                    }
                   }} />
                 </div>
               </div>
@@ -1118,12 +1130,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
+      {/* 核心修复点：将 onLoadedMetadata 直接绑定在真实渲染的 audio 标签上，根除 Safari 后台拉取元数据失败导致的重置 Bug */}
       <audio 
         ref={audioRef} 
         src={formData.audioUrl} 
         onTimeUpdate={handleTimeUpdate} 
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onLoadedMetadata={(e) => setFormData(prev => ({...prev, audioDuration: e.target.duration}))}
         onEnded={() => setIsPlaying(false)}
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
       />
