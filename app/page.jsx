@@ -438,26 +438,32 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 终极播放器防护 (移除隐藏和多余事件，完全同步直驱) =================
+  // ================= 终极播放器防护 =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
+      // 修复核心Bug：移除 sentences.length === 0 的阻断条件，允许在解析前预览音频
+      if (!audioRef.current || isExportingVideo) return;
       
-      if (!audioRef.current.paused) {
+      if (isPlaying) {
           audioRef.current.pause();
+          setIsPlaying(false);
       } else {
-          // 播放到底部后归零
           if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
               audioRef.current.currentTime = 0;
+              setCurrentTime(0);
           }
           
-          // 在原生点击同步帧中发起 play()
           const playPromise = audioRef.current.play();
           if (playPromise !== undefined) {
-              playPromise.catch(err => {
+              playPromise.then(() => {
+                  setIsPlaying(true);
+              }).catch(err => {
                   console.error("播放被拦截:", err);
-                  alert("播放被浏览器拦截。如果您在 Safari，请去设置允许当前网站自动播放。");
+                  alert("播放被浏览器拦截。请确保您已在网页任意位置点击交互过。");
+                  setIsPlaying(false);
               });
+          } else {
+              setIsPlaying(true);
           }
       }
   };
@@ -1126,7 +1132,7 @@ export default function App() {
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={() => setIsPlaying(false)}
-        className="w-0 h-0 absolute opacity-0 pointer-events-none" 
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
       />
       
       {/* 隐藏的离屏 Canvas 用于视频渲染导出 */}
