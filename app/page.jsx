@@ -705,7 +705,13 @@ export default function App() {
     }
 
     let displayEnChunk = "";
+    let longestChunkEn = "";
+    
     if (activeSentence) {
+        longestChunkEn = activeSentence.enChunks.reduce((prev, current) => {
+            return (current.en.length > prev.en.length) ? current : prev;
+        }, { en: "" }).en;
+
         if (activeChunk) {
             displayEnChunk = activeChunk.en;
         } else {
@@ -724,8 +730,8 @@ export default function App() {
           <p className="text-sm font-medium opacity-95 text-yellow-400">{newsDate || getFormattedDate()}</p>
         </div>
 
-        <div className="flex-1 flex flex-col w-full z-10 overflow-hidden">
-          <div className="w-full flex-shrink-0 bg-gray-900 aspect-video flex items-center justify-center border-y border-white/10">
+        <div className="flex-1 flex flex-col w-full z-10 overflow-hidden relative">
+          <div className="w-full flex-shrink-0 bg-gray-900 aspect-video flex items-center justify-center border-y border-white/10 relative">
              {targetImage ? (
                 <CrossfadeImage src={targetImage} />
              ) : (
@@ -734,13 +740,29 @@ export default function App() {
                    <span className="text-xs">等待人工上传配图</span>
                 </div>
              )}
+             
+             {/* 移动到图片中间的播放按钮 */}
+             {!isPlaying && (
+               <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+                 <div className="bg-black/50 rounded-full p-4 backdrop-blur-md border border-white/20 shadow-2xl flex items-center justify-center">
+                   <Play size={40} fill="currentColor" className="text-white opacity-90 ml-1" />
+                 </div>
+               </div>
+             )}
           </div>
           
-          <div className="flex-1 w-full px-5 pt-4 pb-28 overflow-y-auto flex flex-col justify-start space-y-3 relative">
+          {/* 将 pb-28 改为 pb-8 恢复字幕空间 */}
+          <div className="flex-1 w-full px-5 pt-4 pb-8 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
                 {/* 英文独立轨道：利用 CSS Grid 自动撑开并锁定最高切片的高度，杜绝截断和跳动 */}
                 <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 grid">
+                  {/* 隐形占位符：取该句中最长的一个英文切片撑开固定高度 */}
+                  <div className="col-start-1 row-start-1 p-4 opacity-0 pointer-events-none select-none">
+                    <p className="font-semibold text-lg leading-relaxed text-left">
+                      {longestChunkEn}
+                    </p>
+                  </div>
                   {activeSentence.enChunks.map((chunk, cIdx) => (
                     <div key={chunk.id || cIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${displayEnChunk === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
                       <p className="text-white font-semibold text-lg leading-relaxed text-left">
@@ -771,16 +793,18 @@ export default function App() {
           </div>
         </div>
 
-        {!isPlaying && (
-          <div className="absolute bottom-10 left-1/2 transform -translate-x-1/2 z-40 pointer-events-none">
-            <div className="bg-black/60 rounded-full p-4 backdrop-blur-md border border-white/20 shadow-2xl flex items-center justify-center">
-              <Play size={36} fill="currentColor" className="text-white opacity-90 ml-1" />
-            </div>
-          </div>
-        )}
-
-        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-50">
-          <div className="h-full bg-yellow-400 transition-all duration-100 ease-linear" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
+        {/* 底部可拖动进度条 */}
+        <div className="absolute bottom-0 left-0 right-0 h-2 bg-gray-800 z-50 group" onClick={(e) => e.stopPropagation()}>
+          <div className="h-full bg-yellow-400 transition-all duration-100 ease-linear pointer-events-none" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
+          <input 
+            type="range"
+            min="0"
+            max={formData.audioDuration || 1}
+            step="0.01"
+            value={currentTime}
+            onChange={handleSeek}
+            className="absolute inset-0 w-full h-6 -top-2 opacity-0 cursor-pointer z-10"
+          />
         </div>
       </div>
     );
