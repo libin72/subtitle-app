@@ -87,25 +87,25 @@ const splitChineseText = (text) => {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
-  // 音频解析 API 配置 (保留原来的)
+  // 音频解析 API 配置
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  // 文本翻译 API 配置 -> 默认切换为 SiliconFlow 上的 DeepSeek-V3 满血版
-  const [textBaseUrl, setTextBaseUrl] = useState('https://api.siliconflow.cn/v1');
+  // 文本翻译 API 配置 -> 默认切换为 Google Gemini 1.5 Pro (目前最强且有高额免费调用量的模型)
+  const [textBaseUrl, setTextBaseUrl] = useState('https://generativelanguage.googleapis.com/v1beta/openai/');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('deepseek-ai/DeepSeek-V3');
+  const [textModel, setTextModel] = useState('gemini-1.5-pro');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
     
-    // 使用 _v3 后缀绕过旧缓存，强制应用 DeepSeek-V3 默认值
-    if (localStorage.getItem('wx_text_url_v3')) setTextBaseUrl(localStorage.getItem('wx_text_url_v3'));
-    if (localStorage.getItem('wx_text_key_v3')) setTextKey(localStorage.getItem('wx_text_key_v3'));
-    if (localStorage.getItem('wx_text_model_v3')) setTextModel(localStorage.getItem('wx_text_model_v3'));
+    // 使用 _v4 后缀绕过旧缓存，强制重置页面上的配置为您最新的免费好用模型
+    if (localStorage.getItem('wx_text_url_v4')) setTextBaseUrl(localStorage.getItem('wx_text_url_v4'));
+    if (localStorage.getItem('wx_text_key_v4')) setTextKey(localStorage.getItem('wx_text_key_v4'));
+    if (localStorage.getItem('wx_text_model_v4')) setTextModel(localStorage.getItem('wx_text_model_v4'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -298,6 +298,8 @@ export default function App() {
                 
                 if (llmRes.status === 429) {
                     throw new Error("429");
+                } else if (llmRes.status === 403) {
+                    throw new Error(`403 权限受限: 该模型为付费专属或当前 API Key 无权限访问，请尝试免费模型。`);
                 } else if (llmRes.status === 404) {
                     throw new Error(`404 模型未找到: 请检查您的 Model 名称是否拼写正确，或者 Base URL 是否匹配该模型。`);
                 } else if (llmRes.status === 402) {
@@ -919,10 +921,10 @@ export default function App() {
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
                 <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v3', e.target.value); }} placeholder="例如: https://api.siliconflow.cn/v1" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v4', e.target.value); }} placeholder="例如: https://generativelanguage.googleapis.com/v1beta/openai/" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v3', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v3', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v4', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v4', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 </div>
               </div>
             </div>
