@@ -438,34 +438,26 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 播放器与辅助功能 =================
-  // 彻底移除 useEffect 中的异步 play()，改用严格的同步直驱模式防 Safari 拦截
+  // ================= 终极播放器防护 (移除隐藏和多余事件，完全同步直驱) =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
       if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
       
-      if (isPlaying) {
+      if (!audioRef.current.paused) {
           audioRef.current.pause();
-          setIsPlaying(false);
       } else {
-          // 修复：播放到底部后归零
+          // 播放到底部后归零
           if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
               audioRef.current.currentTime = 0;
-              setCurrentTime(0);
           }
           
-          // 同步栈内直接调用原生的 play
+          // 在原生点击同步帧中发起 play()
           const playPromise = audioRef.current.play();
           if (playPromise !== undefined) {
-              playPromise.then(() => {
-                  setIsPlaying(true);
-              }).catch(err => {
+              playPromise.catch(err => {
                   console.error("播放被拦截:", err);
-                  alert("由于浏览器安全限制，自动播放被拦截。请重试点击。");
-                  setIsPlaying(false);
+                  alert("播放被浏览器拦截。如果您在 Safari，请去设置允许当前网站自动播放。");
               });
-          } else {
-              setIsPlaying(true);
           }
       }
   };
@@ -1127,7 +1119,15 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
-      <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
+      <audio 
+        ref={audioRef} 
+        src={formData.audioUrl} 
+        onTimeUpdate={handleTimeUpdate} 
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => setIsPlaying(false)}
+        className="w-0 h-0 absolute opacity-0 pointer-events-none" 
+      />
       
       {/* 隐藏的离屏 Canvas 用于视频渲染导出 */}
       <canvas ref={exportCanvasRef} width={1080} height={1920} className="hidden pointer-events-none" />
