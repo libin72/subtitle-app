@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, FileAudio, Play, Pause, ChevronLeft, 
   CheckCircle, Loader2, Download, Edit3, Clock, 
-  Mic, MessageSquare, ImagePlus, Scissors, ArrowUp, Eye, Image as ImageIcon
+  Mic, MessageSquare, ImagePlus, Scissors, ArrowUp, Eye, Image as ImageIcon, Video
 } from 'lucide-react';
 
 // ================= 图片丝滑渐变组件 =================
@@ -33,11 +33,12 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 中文字幕智能动态切片辅助函数 =================
+// ================= 中文字幕智能动态切片辅助函数 (已修复孤立标点问题) =================
 const splitChineseText = (text) => {
   if (!text) return [];
   const chunks = [];
   let currentChunk = "";
+  
   for (let i = 0; i < text.length; i++) {
       const char = text[i];
       currentChunk += char;
@@ -51,22 +52,34 @@ const splitChineseText = (text) => {
       if (isLast) {
           shouldSplit = true;
       } else if (currentChunk.length >= 30) {
-          // 强制30字硬上限
           shouldSplit = true;
       } else if (isStrong && remaining >= 5) {
-          // 强标点断句，确保尾部不残留少于5字的孤儿句
           shouldSplit = true;
       } else if (isWeak && currentChunk.length >= 15 && remaining >= 5) {
-          // 弱标点满15字顺势断句
           shouldSplit = true;
       }
       
       if (shouldSplit) {
-          chunks.push(currentChunk.trim());
+          // 纯净度检查：如果当前块只包含标点或空格，将其吸附到上一个块中，防止标点落单
+          const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
+          if (pureText.length > 0) {
+              chunks.push(currentChunk.trim());
+          } else if (chunks.length > 0) {
+              chunks[chunks.length - 1] += currentChunk.trim();
+          }
           currentChunk = "";
       }
   }
-  return chunks.filter(c => c.length > 0);
+  
+  if (currentChunk.trim().length > 0) {
+      const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
+      if (pureText.length > 0) {
+          chunks.push(currentChunk.trim());
+      } else if (chunks.length > 0) {
+          chunks[chunks.length - 1] += currentChunk.trim();
+      }
+  }
+  return chunks;
 };
 
 export default function App() {
@@ -96,9 +109,8 @@ export default function App() {
     rawText: ''
   });
 
-  // 核心数据状态：从 flat subtitles 升级为基于“整句 (Sentences)”的嵌套结构
   const [sentences, setSentences] = useState([]);
-  const [blocks, setBlocks] = useState([]); // { id, title, image }
+  const [blocks, setBlocks] = useState([]); 
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -106,12 +118,30 @@ export default function App() {
   const [processMsg, setProcessMsg] = useState("");
   const [newsDate, setNewsDate] = useState('');
   
+  // 视频导出状态
+  const [isExportingVideo, setIsExportingVideo] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  
   const audioRef = useRef(null);
+  const exportCanvasRef = useRef(null);
+  const imageElementCache = useRef({}); // 缓存 Image 对象供 Canvas 绘制使用
 
   const getFormattedDate = () => {
     const date = new Date();
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   };
+
+  // 预加载图片到缓存中，供导出视频使用
+  useEffect(() => {
+    blocks.forEach(b => {
+        if (b.image && !imageElementCache.current[b.image]) {
+            const img = new Image();
+            img.crossOrigin = "anonymous";
+            img.src = b.image;
+            imageElementCache.current[b.image] = img;
+        }
+    });
+  }, [blocks]);
 
   // ================= 核心处理逻辑 =================
   const startProcessing = async () => {
@@ -123,7 +153,6 @@ export default function App() {
     setBlocks([]);
     
     try {
-      // --- 第 1 步：Whisper 对齐 ---
       setProcessMsg("1. 正在进行高精度音频识别与对齐...");
       const whisperUrl = `${audioBaseUrl.trim().replace(/\/+$/, '')}/audio/transcriptions`;
       const audioData = new FormData();
@@ -141,7 +170,6 @@ export default function App() {
       if (!whisperRes.ok) throw new Error(`Whisper 识别失败: ${whisperRes.status}`);
       const whisperResult = await whisperRes.json();
       
-      // 抹平底层差异，提取精确的时间轴词库
       let allWords = [];
       if (whisperResult.words && whisperResult.words.length > 0) {
           allWords = whisperResult.words;
@@ -161,7 +189,6 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      // === 第 2 步：智能组装句子与切片 (杜绝孤儿词，保障整句连贯) ===
       setProcessMsg("正在智能合成整句并划定显示切片...");
       let parsedSentences = [];
       let currentSentence = { id: 0, blockId: 'block-0', zh: "", en: "", enChunks: [] };
@@ -179,39 +206,27 @@ export default function App() {
           const isLastWordOverall = idx === allWords.length - 1;
           const chunkWordCount = currentChunk.words.length;
           const remainingWords = allWords.length - 1 - idx;
-          
-          // 识别停顿时间，防跨段落 (获取当前词与下一个词之间的时间差)
           const nextWordGap = (idx < allWords.length - 1) ? (allWords[idx+1].start - wObj.end) : 0;
           
-          // 正则防误判缩写
           const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
           
-          // 强优先级断点 (句末) vs 弱优先级断点 (逗号暂停)
           const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
           const hasWeak = /[,;，；]['"]*$/.test(w);
 
-          // 段落级断点判断：绝不跨段落。遇到换行符、长停顿(>1.5s)、或句末较长停顿(>0.5s)强制断开
           const isParagraphBreak = /\n/.test(wObj.word) || nextWordGap > 1.5 || (hasStrong && nextWordGap > 0.5);
 
           let splitChunk = false;
           let splitSentence = false;
 
-          // 优先级 1：段落强制阻断 或 全局最后一个词
           if (isLastWordOverall || isParagraphBreak) {
               splitChunk = true;
               splitSentence = true;
-          } 
-          // 优先级 2：正常句末断句 (防止最后掉队少于3个词)
-          else if (hasStrong && remainingWords >= 3) {
+          } else if (hasStrong && remainingWords >= 3) {
               splitChunk = true;
               splitSentence = true;
-          } 
-          // 优先级 3：达到 20 词硬上限，切片但不一定结束整句意思
-          else if (chunkWordCount >= 20) {
+          } else if (chunkWordCount >= 20) {
               splitChunk = true; 
-          } 
-          // 优先级 4：逗号等弱标点，长于 10 个词顺势切片
-          else if (hasWeak && chunkWordCount >= 10 && remainingWords >= 3) {
+          } else if (hasWeak && chunkWordCount >= 10 && remainingWords >= 3) {
               splitChunk = true; 
           }
 
@@ -228,11 +243,10 @@ export default function App() {
           }
       });
 
-      // --- 第 3 步：分批整句无损翻译 (基于整句语境) ---
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
       
-      const chunkSize = 15; // 每次送 15 个整句
+      const chunkSize = 15; 
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
@@ -287,7 +301,6 @@ export default function App() {
 
       setNewsDate(extractedDateStr || getFormattedDate());
 
-      // --- 第 4 步：初始化项目面板 (无默认图片) ---
       setProcessMsg("4. 正在装载双轨媒体池...");
       setBlocks([{ id: 'block-0', title: '新闻开场 (Intro)', image: "" }]);
 
@@ -304,7 +317,7 @@ export default function App() {
     }
   };
 
-  // ================= 手动区块切分逻辑 (基于整句) =================
+  // ================= 手动区块切分逻辑 =================
   const handleSplitAfter = (sentenceId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
     setBlocks(prev => {
@@ -341,15 +354,17 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, image: newBlobUrl } : b));
   };
 
-  // ================= 播放器与导出 =================
+  // ================= 播放器与辅助功能 =================
   useEffect(() => {
-    if (audioRef.current) {
+    if (audioRef.current && !isExportingVideo) {
       if (isPlaying) audioRef.current.play();
       else audioRef.current.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, isExportingVideo]);
 
-  const handleTimeUpdate = () => { if (audioRef.current) setCurrentTime(audioRef.current.currentTime); };
+  const handleTimeUpdate = () => { 
+      if (audioRef.current && !isExportingVideo) setCurrentTime(audioRef.current.currentTime); 
+  };
   const handleSeek = (e) => {
     const newTime = parseFloat(e.target.value);
     setCurrentTime(newTime);
@@ -357,8 +372,7 @@ export default function App() {
   };
   const formatTime = (s) => `${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}.${Math.floor((s%1)*10)}`;
 
-  // 导出 SRT 时，合并显示完整的句子
-  const handleExport = () => {
+  const handleExportSRT = () => {
     let srt = "";
     let srtIdx = 1;
     sentences.forEach(sent => {
@@ -375,9 +389,255 @@ export default function App() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  // ================= 视图渲染 =================
+  // ================= 视频实时渲染导出 (Canvas + MediaRecorder) =================
+  const wrapTextCanvas = (ctx, text, x, y, maxWidth, lineHeight) => {
+      if (!text) return y;
+      let line = '';
+      let currentY = y;
+      // 兼容中英文分词断行
+      const tokens = text.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || text.split('');
+      for (let n = 0; n < tokens.length; n++) {
+          const token = tokens[n];
+          const testLine = line + token;
+          const metrics = ctx.measureText(testLine);
+          if (metrics.width > maxWidth && n > 0 && token.trim() !== '') {
+              ctx.fillText(line, x, currentY);
+              line = token;
+              currentY += lineHeight;
+          } else {
+              line = testLine;
+          }
+      }
+      ctx.fillText(line, x, currentY);
+      return currentY + lineHeight;
+  };
 
-  // 左侧手机预览画面 (双轨独立字幕窗)
+  const drawRoundRect = (ctx, x, y, w, h, r) => {
+      if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(x, y, w, h, r);
+          ctx.closePath();
+      } else {
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.lineTo(x + w - r, y);
+          ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+          ctx.lineTo(x + w, y + h - r);
+          ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+          ctx.lineTo(x + r, y + h);
+          ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+          ctx.lineTo(x, y + r);
+          ctx.quadraticCurveTo(x, y, x + r, y);
+          ctx.closePath();
+      }
+  };
+
+  const startVideoExport = async () => {
+      if (!formData.audioUrl || sentences.length === 0) return alert("请先上传音频并解析剧本");
+      setIsPlaying(false);
+      setIsExportingVideo(true);
+      setExportProgress(0);
+
+      const canvas = exportCanvasRef.current;
+      const ctx = canvas.getContext('2d');
+      const audio = new Audio(formData.audioUrl);
+      audio.crossOrigin = "anonymous";
+      
+      let recordedChunks = [];
+      let animationId;
+      let mediaRecorder;
+
+      try {
+          const canvasStream = canvas.captureStream(30);
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const dest = audioCtx.createMediaStreamDestination();
+          const source = audioCtx.createMediaElementSource(audio);
+          source.connect(dest);
+          
+          const combinedStream = new MediaStream([
+              ...canvasStream.getVideoTracks(),
+              ...dest.stream.getAudioTracks()
+          ]);
+
+          mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+          mediaRecorder.ondataavailable = (e) => {
+              if (e.data.size > 0) recordedChunks.push(e.data);
+          };
+          mediaRecorder.onstop = () => {
+              const blob = new Blob(recordedChunks, { type: 'video/webm' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${formData.title}_export.webm`;
+              a.click();
+              setIsExportingVideo(false);
+              cancelAnimationFrame(animationId);
+          };
+
+          const drawFrame = () => {
+              const time = audio.currentTime;
+              setExportProgress(time / audio.duration);
+
+              // 绘制黑色背景
+              ctx.fillStyle = '#000000';
+              ctx.fillRect(0, 0, 1080, 1920);
+
+              // 1. 顶部标题区域
+              ctx.fillStyle = '#ffffff';
+              ctx.font = 'bold 120px sans-serif';
+              ctx.textAlign = 'center';
+              ctx.fillText('KidNuz', 540, 240);
+
+              ctx.fillStyle = '#facc15'; // yellow-400
+              ctx.font = '500 45px sans-serif';
+              ctx.fillText(newsDate || getFormattedDate(), 540, 320);
+
+              // 智能锚定当前状态
+              let activeSentence = null;
+              let activeChunk = null;
+              let activeZhChunkText = "";
+              let longestChunkEn = ""; 
+
+              for (let i = 0; i < sentences.length; i++) {
+                  const sent = sentences[i];
+                  if (sent.enChunks.length === 0) continue;
+                  const sentStart = sent.enChunks[0].start;
+                  const sentEnd = sent.enChunks[sent.enChunks.length - 1].end;
+                  
+                  if (time >= sentStart && time <= sentEnd) {
+                      activeSentence = sent;
+                      longestChunkEn = sent.enChunks.reduce((prev, current) => (current.en.length > prev.en.length) ? current : prev, { en: "" }).en;
+                      activeChunk = sent.enChunks.find(c => time >= c.start && time <= c.end);
+                      
+                      const zhChunksText = splitChineseText(sent.zh);
+                      if (zhChunksText.length > 0) {
+                          const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
+                          const duration = sentEnd - sentStart;
+                          let t = sentStart;
+                          let found = false;
+                          for (let j = 0; j < zhChunksText.length; j++) {
+                              const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
+                              if (time >= t && time <= t + chunkDur) {
+                                  activeZhChunkText = zhChunksText[j];
+                                  found = true; break;
+                              }
+                              t += chunkDur;
+                          }
+                          if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
+                      }
+                      break;
+                  }
+              }
+
+              const activeOrLastSentence = activeSentence || sentences.slice().reverse().find(s => s.enChunks && s.enChunks[0] && s.enChunks[0].start <= time) || sentences[0];
+              let targetImage = "";
+              if (activeOrLastSentence) {
+                  const b = blocks.find(blk => blk.id === activeOrLastSentence.blockId);
+                  if (b) targetImage = b.image;
+              }
+
+              let displayEnChunk = "";
+              if (activeSentence) {
+                  displayEnChunk = activeChunk ? activeChunk.en : activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
+              }
+
+              // 2. 绘制配图 (16:9 区块)
+              const imgY = 420;
+              const imgH = 607; // 1080 * 9 / 16
+              if (targetImage && imageElementCache.current[targetImage]) {
+                  ctx.drawImage(imageElementCache.current[targetImage], 0, imgY, 1080, imgH);
+              } else {
+                  ctx.fillStyle = '#111827'; // gray-900
+                  ctx.fillRect(0, imgY, 1080, imgH);
+              }
+
+              // 3. 绘制独立字幕面板
+              if (activeSentence) {
+                  const boxWidth = 960;
+                  const boxX = 60;
+                  const textX = 100;
+                  const textMaxWidth = 880;
+
+                  // 英文面板 (模拟蓝底框)
+                  const enBoxY = imgY + imgH + 60;
+                  
+                  // 计算最大英文占据的高度作为固定基底
+                  ctx.font = '600 48px sans-serif';
+                  let simY = enBoxY + 70;
+                  const tokens = longestChunkEn.match(/[\w\.\,\!\?\-\']+|\s+/g) || longestChunkEn.split('');
+                  let simLine = '';
+                  for (let n = 0; n < tokens.length; n++) {
+                      const testLine = simLine + tokens[n];
+                      if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
+                          simLine = tokens[n];
+                          simY += 65;
+                      } else {
+                          simLine = testLine;
+                      }
+                  }
+                  const enBoxHeight = (simY - enBoxY) + 50;
+
+                  ctx.fillStyle = 'rgba(30, 58, 138, 0.6)'; 
+                  ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
+                  ctx.lineWidth = 3;
+                  drawRoundRect(ctx, boxX, enBoxY, boxWidth, enBoxHeight, 24);
+                  ctx.fill();
+                  ctx.stroke();
+
+                  ctx.fillStyle = '#ffffff';
+                  ctx.textAlign = 'left';
+                  wrapTextCanvas(ctx, displayEnChunk, textX, enBoxY + 70, textMaxWidth, 65);
+
+                  // 中文面板 (跟在固定高度的英文框下方)
+                  const zhBoxY = enBoxY + enBoxHeight + 40;
+                  ctx.font = 'bold 42px sans-serif';
+                  
+                  // 估算中文高度
+                  const zhText = activeZhChunkText || activeSentence.zh;
+                  let zhSimY = zhBoxY + 65;
+                  const zhTokens = zhText.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || zhText.split('');
+                  let zhSimLine = '';
+                  for (let n = 0; n < zhTokens.length; n++) {
+                      const testLine = zhSimLine + zhTokens[n];
+                      if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
+                          zhSimLine = zhTokens[n];
+                          zhSimY += 60;
+                      } else {
+                          zhSimLine = testLine;
+                      }
+                  }
+                  const zhBoxHeight = (zhSimY - zhBoxY) + 45;
+
+                  ctx.fillStyle = 'rgba(66, 133, 244, 0.9)'; // Google Blue
+                  ctx.strokeStyle = 'rgba(66, 133, 244, 0.5)';
+                  drawRoundRect(ctx, boxX, zhBoxY, boxWidth, zhBoxHeight, 24);
+                  ctx.fill();
+                  ctx.stroke();
+
+                  ctx.fillStyle = '#ffffff';
+                  wrapTextCanvas(ctx, zhText, textX, zhBoxY + 65, textMaxWidth, 60);
+              }
+
+              animationId = requestAnimationFrame(drawFrame);
+          };
+
+          mediaRecorder.start();
+          audio.play();
+          drawFrame();
+
+          audio.onended = () => {
+              mediaRecorder.stop();
+          };
+
+      } catch (e) {
+          console.error(e);
+          alert("录制失败，请检查浏览器兼容性。");
+          setIsExportingVideo(false);
+          cancelAnimationFrame(animationId);
+      }
+  };
+
+  // ================= 视图渲染 =================
   const renderPhoneScreen = () => {
     if (isProcessing) {
       return (
@@ -397,11 +657,10 @@ export default function App() {
       );
     }
 
-    // 智能锚定：找到当前时间点隶属的“整句”和内部“切片”
     let activeSentence = null;
     let activeChunk = null;
     let activeZhChunkText = "";
-    let longestChunkEn = ""; // 用于固定英文字幕框高度的基准
+    let longestChunkEn = ""; 
     
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
@@ -412,14 +671,12 @@ export default function App() {
         if (currentTime >= sentStart && currentTime <= sentEnd) {
             activeSentence = sent;
             
-            // 计算当前整句中最长的那一个英文切片，作为高度基准
             longestChunkEn = sent.enChunks.reduce((prev, current) => {
                 return (current.en.length > prev.en.length) ? current : prev;
             }, { en: "" }).en;
 
             activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
             
-            // 实时动态切分并映射当前时间应该显示的中文字幕切片
             const zhChunksText = splitChineseText(sent.zh);
             if (zhChunksText.length > 0) {
                 const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
@@ -435,14 +692,12 @@ export default function App() {
                     }
                     t += chunkDur;
                 }
-                // 如果恰好踩在边缘，默认显示最后一个中文切片
                 if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
             }
             break;
         }
     }
 
-    // 防闪黑屏机制：如果目前是空隙时间，锁定显示上一个播完的图片
     const activeOrLastSentence = activeSentence || sentences.slice().reverse().find(s => s.enChunks && s.enChunks[0] && s.enChunks[0].start <= currentTime) || sentences[0];
     
     let targetImage = ""; 
@@ -451,13 +706,11 @@ export default function App() {
         if (b) targetImage = b.image;
     }
 
-    // 若正好卡在句子间隙，维持最后的英文和中文显示状态防止闪动
     let displayEnChunk = "";
     if (activeSentence) {
         if (activeChunk) {
             displayEnChunk = activeChunk.en;
         } else {
-            // 在空隙时间优先显示最后一个切片
             displayEnChunk = activeSentence.enChunks[activeSentence.enChunks.length - 1].en;
         }
     }
@@ -481,19 +734,15 @@ export default function App() {
              )}
           </div>
           
-          {/* 双独立窗口字幕轨道区 */}
-          <div className="flex-1 w-full px-5 pt-4 pb-12 overflow-y-auto flex flex-col justify-start space-y-3 relative">
+          <div className="flex-1 w-full px-5 pt-4 pb-28 overflow-y-auto flex flex-col justify-start space-y-3 relative">
             {activeSentence ? (
               <>
-                {/* 英文独立轨道：跟随短促的时间轴滚动，锁定最大高度防跳动 */}
                 <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 relative overflow-hidden">
-                  {/* 隐形占位符：取该句中最长的一个英文切片撑开固定高度 */}
                   <div className="p-4 opacity-0 pointer-events-none select-none">
                     <p className="font-semibold text-lg leading-relaxed text-left">
                       {longestChunkEn}
                     </p>
                   </div>
-                  {/* 实际显示字幕，绝对定位到上方 */}
                   <div className="absolute inset-0 p-4 flex items-start justify-start">
                     <p className="text-white font-semibold text-lg leading-relaxed text-left">
                       {displayEnChunk}
@@ -501,7 +750,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 中文独立轨道：采用稍浅的Google Blue，跟随英文字幕高度平滑滚动 */}
                 <div className="w-full bg-[#4285F4]/90 backdrop-blur-md p-4 rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg">
                   <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
                     {activeZhChunkText || activeSentence.zh}
@@ -513,12 +761,14 @@ export default function App() {
         </div>
 
         {!isPlaying && (
-          <div className="absolute inset-0 z-0 flex items-center justify-center pointer-events-none">
-            <div className="bg-white/10 rounded-full p-6 backdrop-blur-sm"><Play size={48} fill="currentColor" className="text-white opacity-80 ml-2" /></div>
+          <div className="absolute bottom-10 left-1/2 transform -translate-x-1/2 z-40 pointer-events-none">
+            <div className="bg-black/60 rounded-full p-4 backdrop-blur-md border border-white/20 shadow-2xl flex items-center justify-center">
+              <Play size={36} fill="currentColor" className="text-white opacity-90 ml-1" />
+            </div>
           </div>
         )}
 
-        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-20">
+        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-50">
           <div className="h-full bg-yellow-400 transition-all duration-100 ease-linear" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
         </div>
       </div>
@@ -597,14 +847,19 @@ export default function App() {
                <span>{formatTime(currentTime)}</span><span>{formData.audioDuration ? formatTime(formData.audioDuration) : '00:00.0'}</span>
              </div>
            </div>
-           <button onClick={handleExport} className="bg-gray-800 hover:bg-black text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md">
-            <Download size={16} className="mr-2" /> 导出无损 SRT
-          </button>
+           
+           <div className="flex items-center space-x-2">
+               <button onClick={handleExportSRT} className="bg-gray-800 hover:bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md">
+                <Download size={16} className="mr-2" /> 导出 SRT
+              </button>
+              <button onClick={startVideoExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md transition-colors">
+                <Video size={16} className="mr-2" /> 导出成品视频
+              </button>
+           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
           {blocks.map((block, bIdx) => {
-            // 获取属于这个 Block 的所有整句
             const blockSentences = sentences.filter(s => s.blockId === block.id);
             if (blockSentences.length === 0) return null; 
             
@@ -648,14 +903,12 @@ export default function App() {
                        const sentIdx = sentences.findIndex(s => s.id === sent.id);
                        const isLastOverall = sentIdx === sentences.length - 1;
                        
-                       // 判断该整句是否在激活状态（只要有一个切片激活，即激活整句）
                        const isSentenceActive = sent.enChunks.some(c => currentTime >= c.start && currentTime <= c.end);
 
                        return (
                           <div key={sent.id}>
                             <div className={`rounded-xl border transition-all duration-200 ${isSentenceActive ? 'border-sky-400 bg-sky-50/20 shadow-md ring-1 ring-sky-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
                               
-                              {/* 顶栏：显示整句中文翻译 */}
                               <div className={`px-4 py-2 border-b flex flex-col rounded-t-xl ${isSentenceActive ? 'bg-sky-100/40 border-sky-200' : 'bg-gray-50 border-gray-100'}`}>
                                 <div className="flex justify-between items-center mb-1">
                                     <span className="text-xs font-bold text-gray-500">完整句意翻译 (预览时自动切片滚动)</span>
@@ -663,7 +916,6 @@ export default function App() {
                                 <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-sm font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[40px]" placeholder="请输入整句翻译..." />
                               </div>
 
-                              {/* 底栏：内部切分片段 (仅英文滚动) */}
                               <div className="p-3 space-y-2">
                                 <div className="text-[10px] font-bold text-gray-400 mb-1">英文分切轴 (精确对齐)</div>
                                 {sent.enChunks.map((chunk, cIdx) => {
@@ -682,7 +934,6 @@ export default function App() {
 
                             </div>
 
-                            {/* 在两个整句之间，提供手动断块的按钮 */}
                             {!isLastOverall && (
                               <div className="flex justify-center my-2 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
@@ -707,6 +958,22 @@ export default function App() {
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
       <audio ref={audioRef} src={formData.audioUrl} onTimeUpdate={handleTimeUpdate} onEnded={() => setIsPlaying(false)} className="hidden" />
       
+      {/* 隐藏的离屏 Canvas 用于视频渲染导出 */}
+      <canvas ref={exportCanvasRef} width={1080} height={1920} className="hidden pointer-events-none" />
+
+      {/* 视频导出进度遮罩 */}
+      {isExportingVideo && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center text-white backdrop-blur-sm">
+            <Loader2 size={64} className="animate-spin text-green-500 mb-6" />
+            <h2 className="text-3xl font-bold mb-3 tracking-wide">正在实时渲染并导出视频...</h2>
+            <p className="text-gray-300 mb-8 font-medium">请勿关闭或切换页面标签，此过程需要与音频实际播放等长的时间</p>
+            <div className="w-96 h-3 bg-gray-800 rounded-full overflow-hidden shadow-inner">
+                <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${exportProgress * 100}%` }}></div>
+            </div>
+            <p className="mt-4 text-xl font-mono text-green-400">{Math.round(exportProgress * 100)}%</p>
+        </div>
+      )}
+
       {/* ================= 左侧：模拟手机实时预览区域 ================= */}
       <div className="w-[450px] h-full p-8 flex flex-col items-center justify-center shrink-0 border-r border-white/10 bg-black/40 relative">
          <div className="absolute top-6 left-8 text-white/50 text-xs font-bold tracking-widest flex items-center">
