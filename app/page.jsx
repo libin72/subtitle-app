@@ -438,35 +438,43 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 彻底重构：React 黄金监听范式的终极播放器防护 =================
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || isExportingVideo) return;
-
-    if (isPlaying) {
-      // 修复自动重置逻辑：使用绝对原生的 duration，防 0 阻塞
-      if (audio.currentTime >= audio.duration - 0.1 || audio.ended) {
-        audio.currentTime = 0;
-        setCurrentTime(0);
-      }
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(err => {
-          console.error("播放被拦截:", err);
-          alert("播放被浏览器拦截。请确保您已在网页任意位置点击交互过。");
-          setIsPlaying(false); // 同步还原 UI 状态
-        });
-      }
-    } else {
-      audio.pause();
-    }
-  }, [isPlaying, isExportingVideo]);
-
+  // ================= 真正的同步直驱播放防护 (废除 useEffect) =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      if (!audioRef.current || isExportingVideo) return;
-      // 唯一的数据源驱动：只管切换状态，其他的交给上面的 useEffect 自动处理
-      setIsPlaying(prev => !prev);
+      
+      const audio = audioRef.current;
+      
+      if (!formData.audioUrl) {
+          return alert("请先上传音频文件！");
+      }
+      if (!audio || isExportingVideo) return;
+      
+      if (!audio.paused) {
+          // 如果正在播放，则暂停并同步状态
+          audio.pause();
+          setIsPlaying(false);
+      } else {
+          // 检查是否到了结尾，如果是，重置到开头
+          if (audio.currentTime >= (formData.audioDuration || audio.duration) - 0.1 || audio.ended) {
+              audio.currentTime = 0;
+              setCurrentTime(0);
+          }
+          
+          // 【核心修复点】必须在用户的原生态 Click 交互调用栈里，直接同步调用 play()！
+          // 绝对不能放进 useEffect 异步监听中，否则立刻被 Safari 静音拦截！
+          const playPromise = audio.play();
+          if (playPromise !== undefined) {
+              playPromise.then(() => {
+                  setIsPlaying(true);
+              }).catch(err => {
+                  console.error("播放被拦截:", err);
+                  alert("播放被浏览器拦截。请确保您已在网页点击任意位置完成交互。");
+                  setIsPlaying(false);
+              });
+          } else {
+              setIsPlaying(true);
+          }
+      }
   };
 
   const handleTimeUpdate = () => { 
@@ -983,7 +991,6 @@ export default function App() {
                     <div className="text-center"><FileAudio size={40} className="text-blue-500 mx-auto mb-3" /><p className="font-medium text-gray-700">{formData.audioName}</p></div> : 
                     <div className="text-center text-gray-500"><Upload size={40} className="mx-auto mb-3 text-gray-400" /><p>点击此处上传播报音频 (MP3/WAV)</p></div>
                   }
-                  {/* 核心修复点：将文件提取改为原生同步，移除无用的 new Audio 后台加载，将 onLoadedMetadata 责任交还给下方的 audio 标签 */}
                   <input type="file" accept="audio/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => {
                     const file = e.target.files[0];
                     if (file) { 
@@ -1130,13 +1137,14 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
-      {/* 核心修复点：将 onLoadedMetadata 直接绑定在真实渲染的 audio 标签上，根除 Safari 后台拉取元数据失败导致的重置 Bug */}
       <audio 
         ref={audioRef} 
         src={formData.audioUrl} 
         onTimeUpdate={handleTimeUpdate} 
         onLoadedMetadata={(e) => setFormData(prev => ({...prev, audioDuration: e.target.duration}))}
         onEnded={() => setIsPlaying(false)}
+        onPause={() => setIsPlaying(false)}
+        onPlay={() => setIsPlaying(true)}
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
       />
       
