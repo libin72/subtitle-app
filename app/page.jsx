@@ -83,14 +83,19 @@ const splitChineseText = (text) => {
   return chunks;
 };
 
+// ================= 辅助函数：延时等待 =================
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 export default function App() {
   // API 配置
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
-  const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
+  
+  // 将文本翻译接口默认替换为 DeepSeek
+  const [textBaseUrl, setTextBaseUrl] = useState('https://api.deepseek.com/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
+  const [textModel, setTextModel] = useState('deepseek-chat');
 
   useEffect(() => {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
@@ -271,32 +276,61 @@ export default function App() {
           "subtitles": [ { "id": <exact_id>, "zh": "..." } ]
         }`;
 
-        const llmRes = await fetch(chatUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${textKey}` },
-          body: JSON.stringify({
-            model: textModel.trim(),
-            messages: [{ role: 'user', content: translationPrompt }],
-            temperature: 0.1,
-            response_format: { type: "json_object" } 
-          })
-        });
+        let chunkSuccess = false;
+        let retryCount = 0;
+        const maxRetries = 3;
 
-        if (!llmRes.ok) throw new Error(`翻译失败: ${llmRes.status}`);
-        
-        const llmResult = await llmRes.json();
-        try {
-           const parsed = JSON.parse(llmResult.choices[0].message.content);
-           const transDict = {};
-           (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
-           
-           chunk.forEach(sent => {
-               sent.zh = transDict[sent.id] || "（翻译失败）";
-           });
+        // 加入带有指数退避机制的重试循环，专治 429 限流报错
+        while (!chunkSuccess && retryCount < maxRetries) {
+          try {
+            const llmRes = await fetch(chatUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${textKey}` },
+              body: JSON.stringify({
+                model: textModel.trim(),
+                messages: [{ role: 'user', content: translationPrompt }],
+                temperature: 0.1,
+                response_format: { type: "json_object" } 
+              })
+            });
 
-           if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
-        } catch (e) {
-           console.error("JSON 解析失败");
+            if (llmRes.status === 429) {
+                retryCount++;
+                setProcessMsg(`触发接口限流 (429)，等待 ${retryCount * 5} 秒后自动重试 (${retryCount}/${maxRetries})...`);
+                await delay(5000 * retryCount); // 退避等待：5秒, 10秒, 15秒
+                continue;
+            }
+
+            if (!llmRes.ok) throw new Error(`翻译请求返回状态码: ${llmRes.status}`);
+            
+            const llmResult = await llmRes.json();
+            const parsed = JSON.parse(llmResult.choices[0].message.content);
+            const transDict = {};
+            (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
+            
+            chunk.forEach(sent => {
+                sent.zh = transDict[sent.id] || "（翻译丢失）";
+            });
+
+            if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
+            chunkSuccess = true; // 标记成功，跳出重试循环
+
+          } catch (e) {
+            console.error("当前批次翻译异常:", e);
+            if (retryCount >= maxRetries - 1) {
+                // 重试用尽，依然失败，则保留空壳并继续
+                chunk.forEach(sent => { sent.zh = "（网络请求失败，可手动补充）"; });
+                break;
+            }
+            retryCount++;
+            setProcessMsg(`网络异常，正在重试 (${retryCount}/${maxRetries})...`);
+            await delay(3000);
+          }
+        }
+
+        // 每次成功后固定延时 2 秒，温柔对待 API 接口防限流
+        if (i + chunkSize < parsedSentences.length) {
+            await delay(2000);
         }
       }
 
