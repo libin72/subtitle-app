@@ -7,7 +7,7 @@ import {
   Mic, MessageSquare, ImagePlus, Scissors, ArrowUp, Eye, Image as ImageIcon
 } from 'lucide-react';
 
-// ================= 图片丝滑渐变组件 (16:9 满宽无留白) =================
+// ================= 图片丝滑渐变组件 =================
 const CrossfadeImage = ({ src }) => {
   const [images, setImages] = useState([src]);
 
@@ -18,7 +18,7 @@ const CrossfadeImage = ({ src }) => {
   }, [src]);
 
   return (
-    <div className="relative w-full h-full flex-shrink-0 bg-gray-900 overflow-hidden shadow-xl">
+    <div className="relative w-full h-full flex-shrink-0 bg-gray-950 overflow-hidden shadow-xl">
       {images.map((imgSrc, idx) => (
         <img
           key={`${imgSrc}-${idx}`}
@@ -60,9 +60,9 @@ export default function App() {
     rawText: ''
   });
 
-  // 核心数据状态
-  const [subtitles, setSubtitles] = useState([]);
-  const [blocks, setBlocks] = useState([]); // 存储手动切分的片段 { id, title, image }
+  // 核心数据状态：从 flat subtitles 升级为基于“整句 (Sentences)”的嵌套结构
+  const [sentences, setSentences] = useState([]);
+  const [blocks, setBlocks] = useState([]); // { id, title, image }
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -77,25 +77,24 @@ export default function App() {
     return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   };
 
-  // ================= 处理合成逻辑 =================
+  // ================= 核心处理逻辑 =================
   const startProcessing = async () => {
     if (!formData.audioFile) return alert("请上传音频文件！");
     if (!audioKey || !textKey) return alert("请完善 API 密钥！");
     
     setIsProcessing(true);
-    setSubtitles([]);
+    setSentences([]);
     setBlocks([]);
     
     try {
       // --- 第 1 步：Whisper 对齐 ---
       setProcessMsg("1. 正在进行高精度音频识别与对齐...");
       const whisperUrl = `${audioBaseUrl.trim().replace(/\/+$/, '')}/audio/transcriptions`;
-      
       const audioData = new FormData();
       audioData.append('file', formData.audioFile);
       audioData.append('model', audioModel.trim());
       audioData.append('response_format', 'verbose_json'); 
-      audioData.append('timestamp_granularities[]', 'segment'); 
+      audioData.append('timestamp_granularities[]', 'word'); 
       
       const whisperRes = await fetch(whisperUrl, {
         method: 'POST',
@@ -103,105 +102,122 @@ export default function App() {
         body: audioData
       });
 
-      if (!whisperRes.ok) {
-        const err = await whisperRes.json().catch(()=>({}));
-        throw new Error(`Whisper 识别失败: ${err.error?.message || whisperRes.status}`);
+      if (!whisperRes.ok) throw new Error(`Whisper 识别失败: ${whisperRes.status}`);
+      const whisperResult = await whisperRes.json();
+      
+      // 抹平底层差异，提取精确的时间轴词库
+      let allWords = [];
+      if (whisperResult.words && whisperResult.words.length > 0) {
+          allWords = whisperResult.words;
+      } else if (whisperResult.segments) {
+          whisperResult.segments.forEach(seg => {
+              const words = seg.text.trim().split(/\s+/);
+              const totalChars = words.reduce((acc, w) => acc + w.length, 0);
+              const duration = seg.end - seg.start;
+              let t = seg.start;
+              words.forEach(w => {
+                  const wDur = totalChars > 0 ? (w.length / totalChars) * duration : 0;
+                  allWords.push({ word: w, start: t, end: t + wDur });
+                  t += wDur;
+              });
+          });
+      } else {
+          throw new Error("接口未返回时间轴数据。");
       }
       
-      const whisperResult = await whisperRes.json();
-      if (!whisperResult.segments) throw new Error("接口未返回时间轴数据。");
-      
-      // === 稳健的断句算法 (上限20词, 优先强标点, 防孤儿词, 修复U.S.误判) ===
-      setProcessMsg("正在分析断句与优化词轴...");
-      let finalSourceSegments = [];
+      // === 第 2 步：智能组装句子与切片 (杜绝孤儿词，保障整句连贯) ===
+      setProcessMsg("正在智能合成整句并划定显示切片...");
+      let parsedSentences = [];
+      let currentSentence = { id: 0, blockId: 'block-0', zh: "", en: "", enChunks: [] };
+      let currentChunk = { id: 0, start: null, end: null, words: [] };
+      let chunkIdCounter = 0;
 
-      whisperResult.segments.forEach(seg => {
-        const text = seg.text.trim();
-        const words = text.split(/\s+/);
-        
-        if (words.length <= 20) {
-            finalSourceSegments.push({ start: seg.start, end: seg.end, text: text });
-        } else {
-            let chunks = [];
-            let currentChunk = [];
-            
-            words.forEach((w, idx) => {
-                currentChunk.push(w);
-                const wordCount = currentChunk.length;
-                const remainingWords = words.length - 1 - idx; 
-                const isLastWord = idx === words.length - 1;
+      allWords.forEach((wObj, idx) => {
+          const w = wObj.word.trim();
+          if (!w) return;
 
-                // 正则排除英文缩写造成的误判
-                const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
-                
-                // 首选优先级：句号、问号、叹号、双引号 (防呆：不是缩写才算)
-                const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
-                // 次选优先级：逗号、分号等
-                const hasWeak = /[,;，；]['"]*$/.test(w);
-                
-                let shouldSplit = false;
-                
-                if (isLastWord) {
-                    shouldSplit = true;
-                } else if (wordCount >= 20) {
-                    // 强行触及 20 词上限，强制断开
-                    shouldSplit = true;
-                } else if (hasStrong && remainingWords >= 3) {
-                    // 遇到强标点，且后面至少还有3个词，才断句 (防止尾部剩余1-2个词独立成段)
-                    shouldSplit = true;
-                } else if (hasWeak && wordCount >= 10 && remainingWords >= 3) {
-                    // 遇到弱标点，当前已满10词，且后面有足够多的词
-                    shouldSplit = true;
-                }
+          if (currentChunk.start === null) currentChunk.start = wObj.start;
+          currentChunk.end = wObj.end;
+          currentChunk.words.push(w);
 
-                if (shouldSplit) {
-                    chunks.push(currentChunk.join(" "));
-                    currentChunk = [];
-                }
-            });
+          const isLastWordOverall = idx === allWords.length - 1;
+          const chunkWordCount = currentChunk.words.length;
+          const remainingWords = allWords.length - 1 - idx;
+          
+          // 识别停顿时间，防跨段落 (获取当前词与下一个词之间的时间差)
+          const nextWordGap = (idx < allWords.length - 1) ? (allWords[idx+1].start - wObj.end) : 0;
+          
+          // 正则防误判缩写
+          const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
+          
+          // 强优先级断点 (句末) vs 弱优先级断点 (逗号暂停)
+          const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
+          const hasWeak = /[,;，；]['"]*$/.test(w);
 
-            // 按字符比例均分时间轴
-            const totalChars = chunks.reduce((acc, c) => acc + c.length, 0);
-            const duration = seg.end - seg.start;
-            let currentT = seg.start;
+          // 段落级断点判断：绝不跨段落。遇到换行符、长停顿(>1.5s)、或句末较长停顿(>0.5s)强制断开
+          const isParagraphBreak = /\n/.test(wObj.word) || nextWordGap > 1.5 || (hasStrong && nextWordGap > 0.5);
 
-            chunks.forEach(chunkText => {
-                const chunkDuration = totalChars > 0 ? (chunkText.length / totalChars) * duration : 0;
-                finalSourceSegments.push({ start: currentT, end: currentT + chunkDuration, text: chunkText });
-                currentT += chunkDuration;
-            });
-        }
+          let splitChunk = false;
+          let splitSentence = false;
+
+          // 优先级 1：段落强制阻断 或 全局最后一个词
+          if (isLastWordOverall || isParagraphBreak) {
+              splitChunk = true;
+              splitSentence = true;
+          } 
+          // 优先级 2：正常句末断句 (防止最后掉队少于3个词)
+          else if (hasStrong && remainingWords >= 3) {
+              splitChunk = true;
+              splitSentence = true;
+          } 
+          // 优先级 3：达到 20 词硬上限，切片但不一定结束整句意思
+          else if (chunkWordCount >= 20) {
+              splitChunk = true; 
+          } 
+          // 优先级 4：逗号等弱标点，长于 10 个词顺势切片
+          else if (hasWeak && chunkWordCount >= 10 && remainingWords >= 3) {
+              splitChunk = true; 
+          }
+
+          if (splitChunk) {
+              currentChunk.en = currentChunk.words.join(" ");
+              currentSentence.enChunks.push({ ...currentChunk });
+              currentChunk = { id: ++chunkIdCounter, start: null, end: null, words: [] };
+          }
+
+          if (splitSentence) {
+              currentSentence.en = currentSentence.enChunks.map(c => c.en).join(" ");
+              parsedSentences.push({ ...currentSentence });
+              currentSentence = { id: parsedSentences.length, blockId: 'block-0', zh: "", en: "", enChunks: [] };
+          }
       });
 
-      // --- 第 2 步：分批无损翻译与日期提取 ---
+      // --- 第 3 步：分批整句无损翻译 (基于整句语境) ---
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
-      const inputMapping = finalSourceSegments.map((s, i) => ({ id: i, en: s.text }));
-      let translatedData = [];
       let extractedDateStr = "";
       
-      const chunkSize = 10; 
-      const totalChunks = Math.ceil(inputMapping.length / chunkSize);
+      const chunkSize = 15; // 每次送 15 个整句
+      const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
-      for (let i = 0; i < inputMapping.length; i += chunkSize) {
-        setProcessMsg(`2. 翻译校对中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
-        const chunk = inputMapping.slice(i, i + chunkSize);
+      for (let i = 0; i < parsedSentences.length; i += chunkSize) {
+        setProcessMsg(`3. 结合上下文翻译中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
+        const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
-        // 升级版 Prompt: 强调上下文连贯与强制简体中文
         const translationPrompt = `You are a professional subtitle translator.
         1. Correct OCR/speech typos in English using the RAW REFERENCE.
-        2. Translate English to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
+        2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
-        4. CRITICAL: You MUST translate EVERY SINGLE segment provided. Return EXACTLY ${chunk.length} items in "subtitles", mapping exactly to the input "id".
-        5. CONTEXTUAL TRANSLATION: Subtitles are often cut mid-sentence due to time limits. You MUST look at the surrounding segments to understand the full complete meaning. Translate the FULL sentence naturally, and then distribute the Chinese translation appropriately across the segments. It is acceptable if the Chinese text doesn't match the English word-for-word in a specific tiny segment, as long as the overall Chinese meaning flows perfectly across the continuous blocks.
+        4. CRITICAL: You MUST translate EVERY SINGLE sentence provided. Return EXACTLY ${chunk.length} items mapping exactly to the input "id".
+        5. CONTEXTUAL TRANSLATION: Understand the full context of the paragraph. Ensure the Chinese translation represents the complete grammatical meaning of the sentence.
 
-        RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 800) : "None."}
-        INPUT: ${JSON.stringify(chunk)}
+        RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 1000) : "None."}
+        INPUT JSON: ${JSON.stringify(chunk.map(c => ({ id: c.id, en: c.en })))}
 
         OUTPUT JSON FORMAT:
         {
           "extractedDate": "...",
-          "subtitles": [ { "id": <exact_id>, "en": "...", "zh": "..." } ]
+          "subtitles": [ { "id": <exact_id>, "zh": "..." } ]
         }`;
 
         const llmRes = await fetch(chatUrl, {
@@ -220,7 +236,13 @@ export default function App() {
         const llmResult = await llmRes.json();
         try {
            const parsed = JSON.parse(llmResult.choices[0].message.content);
-           translatedData = translatedData.concat(parsed.subtitles || []);
+           const transDict = {};
+           (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
+           
+           chunk.forEach(sent => {
+               sent.zh = transDict[sent.id] || "（翻译失败）";
+           });
+
            if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
         } catch (e) {
            console.error("JSON 解析失败");
@@ -229,30 +251,12 @@ export default function App() {
 
       setNewsDate(extractedDateStr || getFormattedDate());
 
-      // --- 第 3 步：初始化单个默认块 (无默认图片) ---
-      setProcessMsg("3. 正在组装项目...");
-      const initialBlockId = 'block-0';
-      
-      setBlocks([{
-        id: initialBlockId,
-        title: '新闻开场 (Intro)',
-        image: "" 
-      }]);
-
-      let finalSubtitles = finalSourceSegments.map((seg, i) => {
-        const matchObj = translatedData.find(t => t.id === i) || {};
-        return { 
-          id: i, 
-          start: seg.start, 
-          end: seg.end, 
-          en: matchObj.en || seg.text, 
-          zh: matchObj.zh || "（翻译失败，可手动补全）",
-          blockId: initialBlockId
-        };
-      });
+      // --- 第 4 步：初始化项目面板 (无默认图片) ---
+      setProcessMsg("4. 正在装载双轨媒体池...");
+      setBlocks([{ id: 'block-0', title: '新闻开场 (Intro)', image: "" }]);
 
       setTimeout(() => {
-        setSubtitles(finalSubtitles);
+        setSentences(parsedSentences);
         setCurrentTime(0);
         setIsProcessing(false);
       }, 500);
@@ -264,8 +268,8 @@ export default function App() {
     }
   };
 
-  // ================= 手动区块切分逻辑 =================
-  const handleSplitAfter = (subId, currentBlockId) => {
+  // ================= 手动区块切分逻辑 (基于整句) =================
+  const handleSplitAfter = (sentenceId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
@@ -273,12 +277,12 @@ export default function App() {
         newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `新闻片段 ${newBlocks.length + 1}`, image: "" });
         return newBlocks;
     });
-    setSubtitles(prev => {
+    setSentences(prev => {
         let passedSplitPoint = false;
-        return prev.map(sub => {
-            if (sub.id === subId) { passedSplitPoint = true; return sub; }
-            if (passedSplitPoint && sub.blockId === currentBlockId) return { ...sub, blockId: newBlockId };
-            return sub;
+        return prev.map(sent => {
+            if (sent.id === sentenceId) { passedSplitPoint = true; return sent; }
+            if (passedSplitPoint && sent.blockId === currentBlockId) return { ...sent, blockId: newBlockId };
+            return sent;
         });
     });
   };
@@ -288,7 +292,7 @@ export default function App() {
         const idx = prev.findIndex(b => b.id === blockId);
         if (idx <= 0) return prev;
         const targetBlockId = prev[idx - 1].id;
-        setSubtitles(subs => subs.map(sub => sub.blockId === blockId ? { ...sub, blockId: targetBlockId } : sub));
+        setSentences(subs => subs.map(sent => sent.blockId === blockId ? { ...sent, blockId: targetBlockId } : sent));
         const newBlocks = [...prev];
         newBlocks.splice(idx, 1);
         return newBlocks;
@@ -301,11 +305,7 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, image: newBlobUrl } : b));
   };
 
-  const handleRenameBlock = (blockId, newTitle) => {
-    setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
-  };
-
-  // ================= 播放器与辅助功能 =================
+  // ================= 播放器与导出 =================
   useEffect(() => {
     if (audioRef.current) {
       if (isPlaying) audioRef.current.play();
@@ -321,12 +321,17 @@ export default function App() {
   };
   const formatTime = (s) => `${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}.${Math.floor((s%1)*10)}`;
 
+  // 导出 SRT 时，合并显示完整的句子
   const handleExport = () => {
     let srt = "";
-    subtitles.forEach((sub, i) => {
-      const pad = (n, s) => ('000'+n).slice(s*-1);
-      const fmt = (sec) => `${pad(Math.floor(sec/3600),2)}:${pad(Math.floor((sec%3600)/60),2)}:${pad(Math.floor(sec%60),2)},${pad(Math.floor((sec%1)*1000),3)}`;
-      srt += `${i + 1}\n${fmt(sub.start)} --> ${fmt(sub.end)}\n${sub.en}\n${sub.zh}\n\n`;
+    let srtIdx = 1;
+    sentences.forEach(sent => {
+        if (!sent.enChunks || sent.enChunks.length === 0) return;
+        const start = sent.enChunks[0].start;
+        const end = sent.enChunks[sent.enChunks.length - 1].end;
+        const pad = (n, s) => ('000'+n).slice(s*-1);
+        const fmt = (sec) => `${pad(Math.floor(sec/3600),2)}:${pad(Math.floor((sec%3600)/60),2)}:${pad(Math.floor(sec%60),2)},${pad(Math.floor((sec%1)*1000),3)}`;
+        srt += `${srtIdx++}\n${fmt(start)} --> ${fmt(end)}\n${sent.en}\n${sent.zh}\n\n`;
     });
     const blob = new Blob([srt], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -336,6 +341,7 @@ export default function App() {
 
   // ================= 视图渲染 =================
 
+  // 左侧手机预览画面 (双轨独立字幕窗)
   const renderPhoneScreen = () => {
     if (isProcessing) {
       return (
@@ -346,29 +352,43 @@ export default function App() {
       );
     }
 
-    if (subtitles.length === 0) {
+    if (sentences.length === 0) {
       return (
         <div className="flex-1 flex flex-col items-center justify-center bg-gray-900 text-gray-500 p-6 text-center space-y-4">
           <ImageIcon size={48} className="opacity-50" />
-          <p className="text-sm">在右侧工作区上传音频并处理，即可在此处实时预览全屏播报效果</p>
+          <p className="text-sm">上传音频构建剧本，在此处预览双轨全屏播报效果</p>
         </div>
       );
     }
 
-    // 核心修复：即使处于Gap(空隙时间)，也要保持显示上一个Subtitle所在的Block图片，拒绝闪黑屏
-    const activeSubtitle = subtitles.find(s => currentTime >= s.start && currentTime <= s.end);
-    // 寻找当前或刚刚过去的最新字幕，用于锚定图片
-    const activeOrLastSubtitle = activeSubtitle || subtitles.slice().reverse().find(s => s.start <= currentTime) || subtitles[0];
+    // 智能锚定：找到当前时间点隶属的“整句”和内部“切片”
+    let activeSentence = null;
+    let activeChunk = null;
+    
+    for (let i = 0; i < sentences.length; i++) {
+        const sent = sentences[i];
+        if (sent.enChunks.length === 0) continue;
+        const sentStart = sent.enChunks[0].start;
+        const sentEnd = sent.enChunks[sent.enChunks.length - 1].end;
+        if (currentTime >= sentStart && currentTime <= sentEnd) {
+            activeSentence = sent;
+            activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
+            break;
+        }
+    }
+
+    // 防闪黑屏机制：如果目前是空隙时间，锁定显示上一个播完的图片
+    const activeOrLastSentence = activeSentence || sentences.slice().reverse().find(s => s.enChunks && s.enChunks[0] && s.enChunks[0].start <= currentTime) || sentences[0];
     
     let targetImage = ""; 
-    if (activeOrLastSubtitle) {
-        const b = blocks.find(blk => blk.id === activeOrLastSubtitle.blockId);
+    if (activeOrLastSentence) {
+        const b = blocks.find(blk => blk.id === activeOrLastSentence.blockId);
         if (b) targetImage = b.image;
     }
 
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={() => setIsPlaying(!isPlaying)}>
-        <div className="flex-none pt-16 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
+        <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
           <h1 className="text-4xl font-extrabold tracking-tight mb-2 font-sans">KidNuz</h1>
           <p className="text-sm font-medium opacity-95 text-yellow-400">{newsDate || getFormattedDate()}</p>
         </div>
@@ -384,12 +404,25 @@ export default function App() {
                 </div>
              )}
           </div>
-          <div className="flex-1 w-full px-5 pt-6 pb-12 overflow-y-auto flex flex-col justify-start">
-            {activeSubtitle ? (
-              <div className="w-full bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10">
-                <p className="text-white font-semibold text-lg leading-relaxed drop-shadow-md mb-2 text-left">{activeSubtitle.en}</p>
-                <p className="text-yellow-400 font-bold text-[15px] leading-relaxed drop-shadow-md text-left">{activeSubtitle.zh}</p>
-              </div>
+          
+          {/* 双独立窗口字幕轨道区 */}
+          <div className="flex-1 w-full px-5 pt-4 pb-12 overflow-y-auto flex flex-col justify-start space-y-3 relative">
+            {activeSentence ? (
+              <>
+                {/* 英文独立轨道：跟随短促的时间轴滚动 */}
+                <div className="w-full bg-blue-900/60 backdrop-blur-md p-4 rounded-xl border border-blue-500/30 transform transition-all duration-300">
+                  <p className="text-white font-semibold text-lg leading-relaxed text-left">
+                    {activeChunk ? activeChunk.en : activeSentence.enChunks.map(c=>c.en).join(" ")}
+                  </p>
+                </div>
+
+                {/* 中文独立轨道：以整句为单位停留，保障完整理解 */}
+                <div className="w-full bg-yellow-900/70 backdrop-blur-md p-4 rounded-xl border border-yellow-500/30 transform transition-all duration-300 shadow-lg">
+                  <p className="text-yellow-400 font-bold text-[15px] leading-relaxed text-left">
+                    {activeSentence.zh}
+                  </p>
+                </div>
+              </>
             ) : null}
           </div>
         </div>
@@ -408,13 +441,13 @@ export default function App() {
   };
 
   const renderWorkspace = () => {
-    if (subtitles.length === 0) {
+    if (sentences.length === 0) {
       return (
         <div className="flex-1 overflow-y-auto bg-gray-50 flex flex-col">
           <div className="p-8 max-w-3xl mx-auto w-full space-y-8 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">支持大文件解析，全手动切分片段并独立配图。</p>
+              <p className="text-sm text-gray-500 mt-2">支持独立双轨时间轴，整句无损翻译，无初始配图纯净流。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
@@ -480,14 +513,15 @@ export default function App() {
              </div>
            </div>
            <button onClick={handleExport} className="bg-gray-800 hover:bg-black text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center shadow-md">
-            <Download size={16} className="mr-2" /> 导出 SRT
+            <Download size={16} className="mr-2" /> 导出无损 SRT
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
           {blocks.map((block, bIdx) => {
-            const blockSubs = subtitles.filter(s => s.blockId === block.id);
-            if (blockSubs.length === 0) return null; 
+            // 获取属于这个 Block 的所有整句
+            const blockSentences = sentences.filter(s => s.blockId === block.id);
+            if (blockSentences.length === 0) return null; 
             
             return (
               <div key={block.id} className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col 2xl:flex-row">
@@ -500,7 +534,7 @@ export default function App() {
                          className="font-bold text-lg text-gray-800 bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 outline-none w-2/3 px-1"
                        />
                        {bIdx > 0 && (
-                         <button onClick={() => handleMergeUp(block.id)} title="与上一个片段合并" className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                         <button onClick={() => handleMergeUp(block.id)} title="与上个新闻合并" className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
                            <ArrowUp size={18} />
                          </button>
                        )}
@@ -519,45 +553,55 @@ export default function App() {
                        </div>
                     </div>
                     <label className="w-full flex items-center justify-center bg-white border border-gray-300 text-gray-700 hover:text-blue-600 hover:border-blue-400 py-2.5 rounded-xl cursor-pointer text-sm font-semibold transition-colors shadow-sm">
-                       <ImagePlus size={16} className="mr-2" /> 上传片段配图
+                       <ImagePlus size={16} className="mr-2" /> 上传片段专属配图
                        <input type="file" accept="image/*" className="hidden" onChange={(e)=>handleReplaceBlockImage(block.id, e.target.files[0])} />
                     </label>
                  </div>
                  
-                 <div className="flex-1 p-5 bg-white max-h-[500px] overflow-y-auto space-y-3 relative">
-                    {blockSubs.map((sub, sIdx) => {
-                       const idx = subtitles.findIndex(s => s.id === sub.id);
-                       const isActive = currentTime >= sub.start && currentTime <= sub.end;
-                       const isLastOverall = idx === subtitles.length - 1;
+                 <div className="flex-1 p-5 bg-white max-h-[500px] overflow-y-auto space-y-4 relative">
+                    {blockSentences.map((sent, sIdx) => {
+                       const sentIdx = sentences.findIndex(s => s.id === sent.id);
+                       const isLastOverall = sentIdx === sentences.length - 1;
+                       
+                       // 判断该整句是否在激活状态（只要有一个切片激活，即激活整句）
+                       const isSentenceActive = sent.enChunks.some(c => currentTime >= c.start && currentTime <= c.end);
 
                        return (
-                          <div key={sub.id}>
-                            <div className={`rounded-xl border transition-all duration-200 ${isActive ? 'border-blue-400 bg-blue-50 shadow-md ring-2 ring-blue-100' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
-                              <div className={`px-4 py-2 border-b flex justify-between items-center rounded-t-xl ${isActive ? 'bg-blue-100/40 border-blue-100' : 'bg-gray-50 border-gray-100'}`}>
-                                <div className="flex items-center space-x-2 text-xs font-mono font-medium text-gray-500">
-                                  <Clock size={14} className={isActive ? 'text-blue-500' : 'text-gray-400'} />
-                                  <input type="number" step="0.1" value={sub.start.toFixed(1)} onChange={(e) => { const n=[...subtitles]; n[idx].start=parseFloat(e.target.value)||0; setSubtitles(n); }} className="w-14 bg-transparent text-center outline-none focus:text-blue-600 focus:border-b focus:border-blue-300 transition-colors" />
-                                  <span>→</span>
-                                  <input type="number" step="0.1" value={sub.end.toFixed(1)} onChange={(e) => { const n=[...subtitles]; n[idx].end=parseFloat(e.target.value)||0; setSubtitles(n); }} className="w-14 bg-transparent text-center outline-none focus:text-blue-600 focus:border-b focus:border-blue-300 transition-colors" />
+                          <div key={sent.id}>
+                            <div className={`rounded-xl border transition-all duration-200 ${isSentenceActive ? 'border-yellow-400 bg-yellow-50/20 shadow-md ring-1 ring-yellow-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                              
+                              {/* 顶栏：显示整句中文翻译 */}
+                              <div className={`px-4 py-2 border-b flex flex-col rounded-t-xl ${isSentenceActive ? 'bg-yellow-100/40 border-yellow-200' : 'bg-gray-50 border-gray-100'}`}>
+                                <div className="flex justify-between items-center mb-1">
+                                    <span className="text-xs font-bold text-gray-500">完整句意翻译 (展示停留)</span>
                                 </div>
+                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-sm font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[40px]" placeholder="请输入整句翻译..." />
                               </div>
+
+                              {/* 底栏：内部切分片段 (仅英文滚动) */}
                               <div className="p-3 space-y-2">
-                                <div className="flex items-start">
-                                  <span className="text-[10px] font-bold text-gray-400 w-8 pt-1">EN</span>
-                                  <textarea value={sub.en} onChange={(e) => { const n=[...subtitles]; n[idx].en=e.target.value; setSubtitles(n); }} className="flex-1 text-sm font-medium text-gray-900 bg-transparent outline-none resize-none min-h-[40px] leading-relaxed" />
-                                </div>
-                                <div className="w-full h-px bg-gray-100"></div>
-                                <div className="flex items-start">
-                                  <span className="text-[10px] font-bold text-blue-400 w-8 pt-1">中</span>
-                                  <textarea value={sub.zh} onChange={(e) => { const n=[...subtitles]; n[idx].zh=e.target.value; setSubtitles(n); }} className="flex-1 text-sm font-medium text-gray-700 bg-transparent outline-none resize-none min-h-[40px] leading-relaxed" />
-                                </div>
+                                <div className="text-[10px] font-bold text-gray-400 mb-1">英文分切轴 (精确对齐)</div>
+                                {sent.enChunks.map((chunk, cIdx) => {
+                                    const isChunkActive = currentTime >= chunk.start && currentTime <= chunk.end;
+                                    return (
+                                        <div key={chunk.id} className={`flex items-start space-x-2 rounded-lg p-2 border ${isChunkActive ? 'border-blue-400 bg-blue-50' : 'border-gray-100 bg-gray-50'}`}>
+                                            <div className="flex flex-col space-y-1 w-14 shrink-0">
+                                                <input type="number" step="0.1" value={chunk.start.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].start=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[10px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                                <input type="number" step="0.1" value={chunk.end.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].end=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[10px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                            </div>
+                                            <textarea value={chunk.en} onChange={(e) => { const n=[...sentences]; n[sentIdx].enChunks[cIdx].en=e.target.value; n[sentIdx].en = n[sentIdx].enChunks.map(c=>c.en).join(" "); setSentences(n); }} className="flex-1 text-xs font-medium text-gray-700 bg-transparent outline-none resize-none h-[40px]" />
+                                        </div>
+                                    )
+                                })}
                               </div>
+
                             </div>
 
+                            {/* 在两个整句之间，提供手动断块的按钮 */}
                             {!isLastOverall && (
-                              <div className="flex justify-center my-1 relative group py-1">
+                              <div className="flex justify-center my-2 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
-                                <button onClick={() => handleSplitAfter(sub.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-blue-600 group-hover:border-blue-400 group-hover:shadow-sm text-xs px-3 py-1 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
+                                <button onClick={() => handleSplitAfter(sent.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-blue-600 group-hover:border-blue-400 group-hover:shadow-sm text-xs px-3 py-1 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
                                   <Scissors size={12} className="mr-1.5" /> 在此向下拆分新片段
                                 </button>
                               </div>
