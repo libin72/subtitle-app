@@ -62,7 +62,7 @@ const getParagraphBreaks = (allWords, rawText) => {
     return breaks;
 };
 
-// ================= 智能断句与排版算法 (融合原稿段落强制切分) =================
+// ================= 智能断句与排版算法 =================
 const buildSubtitleStructures = (allWords, rawText) => {
     const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
     const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
@@ -160,24 +160,24 @@ const splitChineseText = (text) => {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
-  // 统一全局使用 Groq API 节点
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
   const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('llama3-70b-8192');
+  // 核心修复1：默认使用 llama3-8b-8192 获取 5 倍免费吞吐量 (30000 TPM)
+  const [textModel, setTextModel] = useState('llama3-8b-8192');
 
   const [isEnSourceRaw, setIsEnSourceRaw] = useState(false);
 
   useEffect(() => {
-    if (localStorage.getItem('wx_audio_url_v_groq')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_groq'));
-    if (localStorage.getItem('wx_audio_key_v_groq')) setAudioKey(localStorage.getItem('wx_audio_key_v_groq'));
-    if (localStorage.getItem('wx_audio_model_v_groq')) setAudioModel(localStorage.getItem('wx_audio_model_v_groq'));
-    if (localStorage.getItem('wx_text_url_v_groq')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_groq'));
-    if (localStorage.getItem('wx_text_key_v_groq')) setTextKey(localStorage.getItem('wx_text_key_v_groq'));
-    if (localStorage.getItem('wx_text_model_v_groq')) setTextModel(localStorage.getItem('wx_text_model_v_groq'));
+    if (localStorage.getItem('wx_audio_url_v_groq2')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_groq2'));
+    if (localStorage.getItem('wx_audio_key_v_groq2')) setAudioKey(localStorage.getItem('wx_audio_key_v_groq2'));
+    if (localStorage.getItem('wx_audio_model_v_groq2')) setAudioModel(localStorage.getItem('wx_audio_model_v_groq2'));
+    if (localStorage.getItem('wx_text_url_v_groq2')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_groq2'));
+    if (localStorage.getItem('wx_text_key_v_groq2')) setTextKey(localStorage.getItem('wx_text_key_v_groq2'));
+    if (localStorage.getItem('wx_text_model_v_groq2')) setTextModel(localStorage.getItem('wx_text_model_v_groq2'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -328,7 +328,7 @@ export default function App() {
                 model: textModel.trim(),
                 messages: [{ role: 'user', content: translationPrompt }],
                 temperature: 0.1,
-                response_format: { type: "json_object" } // 强制 Groq 输出合法 JSON
+                response_format: { type: "json_object" } 
               })
             });
 
@@ -340,7 +340,7 @@ export default function App() {
                     errMsg = errJson.error?.message || errJson.message || errRaw;
                 } catch (e) {}
                 if (llmRes.status === 429) throw new Error("429");
-                throw new Error(`${llmRes.status} 服务器内部报错: ${errMsg}`);
+                throw new Error(`${llmRes.status} ${errMsg}`);
             }
             
             const llmResult = await llmRes.json();
@@ -371,18 +371,26 @@ export default function App() {
 
           } catch (e) {
             console.error("翻译异常:", e);
+            // 核心修复 2：暴露真实的错误堆栈，替代死板的文案
+            let displayError = e.message;
+            if (e.name === "TypeError" && e.message.includes("fetch")) {
+                displayError = "VPN路由失败或跨域拦截";
+            }
+
+            // 核心修复 3：强化 Groq API 的 429 退避策略
             if (e.message === "429") {
                 retryCount++;
-                setProcessMsg(`触发 429 限流保护，等待 ${retryCount * 5} 秒后自动重试...`);
-                await delay(5000 * retryCount);
+                setProcessMsg(`触发额度超限保护 (Groq限制)，系统智能休眠 ${retryCount * 10} 秒后自动续传...`);
+                await delay(10000 * retryCount);
                 continue;
             }
+
             if (retryCount >= maxRetries - 1) {
-                chunk.forEach(sent => { sent.zh = `【严重异常】网络受阻`; });
+                chunk.forEach(sent => { sent.zh = `【异常报错】${displayError}`; });
                 break;
             }
             retryCount++;
-            setProcessMsg(`请求受阻，尝试重新唤醒通道 (${retryCount}/${maxRetries})...`);
+            setProcessMsg(`节点通道受阻 [${displayError}]，尝试重新唤醒 (${retryCount}/${maxRetries})...`);
             await delay(3000);
           }
         }
@@ -894,25 +902,25 @@ export default function App() {
           <div className="p-8 max-w-3xl mx-auto w-full space-y-6 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">全局接驳 Groq 高速通道，彻底消除双轨断连风险。</p>
+              <p className="text-sm text-gray-500 mt-2">已全面升级 Groq 高速通道，搭载动态纠错与限流退避系统。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
                 <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 语音节点 (Groq)</label>
-                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq2', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
 
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
                 <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译与对齐节点 (Groq)</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq2', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
             </div>
