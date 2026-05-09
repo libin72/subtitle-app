@@ -33,7 +33,57 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 辅助延时函数 =================
+// ================= 中文字幕智能动态切片辅助函数 =================
+const splitChineseText = (text) => {
+  if (!text) return [];
+  const chunks = [];
+  let currentChunk = "";
+  
+  for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      currentChunk += char;
+      const remaining = text.length - 1 - i;
+      
+      const isStrong = /[。？！”’\n]/.test(char);
+      const isWeak = /[，；、]/.test(char);
+      const isLast = i === text.length - 1;
+      
+      let shouldSplit = false;
+      if (isLast) {
+          shouldSplit = true;
+      } else if (currentChunk.length >= 30) {
+          shouldSplit = true;
+      } else if (isStrong && remaining >= 5) {
+          shouldSplit = true;
+      } else if (isWeak && currentChunk.length >= 15 && remaining >= 5) {
+          shouldSplit = true;
+      }
+      
+      if (shouldSplit) {
+          const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
+          if (pureText.length > 0) {
+              chunks.push(currentChunk.trim());
+          } else if (chunks.length > 0) {
+              chunks[chunks.length - 1] += currentChunk.trim();
+          } else {
+              chunks.push(currentChunk.trim());
+          }
+          currentChunk = "";
+      }
+  }
+  
+  if (currentChunk.trim().length > 0) {
+      const pureText = currentChunk.replace(/[\s。？！”’，；、·]/g, '');
+      if (pureText.length > 0) {
+          chunks.push(currentChunk.trim());
+      } else if (chunks.length > 0) {
+          chunks[chunks.length - 1] += currentChunk.trim();
+      }
+  }
+  return chunks;
+};
+
+// 辅助延时函数
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
@@ -41,6 +91,8 @@ export default function App() {
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
+  
+  // 文本翻译 API 配置 -> 默认切换为智谱 GLM-4-Flash
   const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('glm-4-flash');
@@ -49,6 +101,7 @@ export default function App() {
     if (localStorage.getItem('wx_audio_url')) setAudioBaseUrl(localStorage.getItem('wx_audio_url'));
     if (localStorage.getItem('wx_audio_key')) setAudioKey(localStorage.getItem('wx_audio_key'));
     if (localStorage.getItem('wx_audio_model')) setAudioModel(localStorage.getItem('wx_audio_model'));
+    
     if (localStorage.getItem('wx_text_url_v5')) setTextBaseUrl(localStorage.getItem('wx_text_url_v5'));
     if (localStorage.getItem('wx_text_key_v5')) setTextKey(localStorage.getItem('wx_text_key_v5'));
     if (localStorage.getItem('wx_text_model_v5')) setTextModel(localStorage.getItem('wx_text_model_v5'));
@@ -62,9 +115,6 @@ export default function App() {
     audioDuration: 0,
     rawText: ''
   });
-
-  // 新增：英文字幕源开关 ('ai' | 'raw')
-  const [enSource, setEnSource] = useState('ai');
 
   const [sentences, setSentences] = useState([]);
   const [blocks, setBlocks] = useState([]); 
@@ -102,7 +152,6 @@ export default function App() {
   const startProcessing = async () => {
     if (!formData.audioFile) return alert("请上传音频文件！");
     if (!audioKey || !textKey) return alert("请完善 API 密钥！");
-    if (enSource === 'raw' && !formData.rawText.trim()) return alert("选择以原稿为准时，请务必在输入框中粘贴原版英文文本！");
     
     setIsProcessing(true);
     setSentences([]);
@@ -122,16 +171,28 @@ export default function App() {
       audioData.append('model', audioModel.trim());
       audioData.append('response_format', 'verbose_json'); 
       audioData.append('timestamp_granularities[]', 'word'); 
+      // 移除 prompt 传参，避免 Whisper 产生幻觉和时轴混乱
       
       const whisperRes = await fetch(whisperUrl, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${audioKey}` },
         body: audioData
       }).catch(err => {
-          throw new Error("网络断开或跨域拦截，请检查您的网络连接或代理设置。");
+          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请检查您的网络连接或代理设置。");
       });
 
-      if (!whisperRes.ok) throw new Error(`Whisper 识别失败: ${whisperRes.status}`);
+      if (!whisperRes.ok) {
+          let errText = whisperRes.statusText;
+          try {
+              const errJson = await whisperRes.json();
+              errText = errJson.error?.message || errText;
+          } catch(e) {}
+          if (whisperRes.status === 503) {
+              throw new Error("503 Service Unavailable: 解析服务器目前崩溃宕机或过载，触发了跨域阻断。建议稍后再试，或更换其他 Whisper API 节点。");
+          }
+          throw new Error(`Whisper 识别失败 (${whisperRes.status}): ${errText}`);
+      }
+      
       const whisperResult = await whisperRes.json();
       
       let allWords = [];
@@ -153,7 +214,7 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      // === 第 2 步：智能组装句子与切片 (加严段落阻断机制) ===
+      // === 第 2 步：智能组装句子与切片 (升级版断句引擎) ===
       setProcessMsg("正在智能合成整句并划定显示切片...");
       let parsedSentences = [];
       let currentSentence = { id: 0, blockId: 'block-0', zh: "", en: "", enChunks: [] };
@@ -173,54 +234,66 @@ export default function App() {
           const remainingWords = allWords.length - 1 - idx;
           const nextWordGap = (idx < allWords.length - 1) ? (allWords[idx+1].start - wObj.end) : 0;
           
+          // 正则防误判缩写 (U.S., U.K., Mr. 等)
           const isAbbr = /^(U\.S\.|U\.K\.|Dr\.|Mr\.|Mrs\.|Ms\.|Prof\.|Inc\.|Ltd\.|A\.M\.|P\.M\.|e\.g\.|i\.e\.|vs\.|St\.|Gov\.|Sen\.|Rep\.|Gen\.|Col\.|Capt\.|Lt\.|Sgt\.|Cpl\.|Pvt\.|Jan\.|Feb\.|Mar\.|Apr\.|Aug\.|Sept\.|Oct\.|Nov\.|Dec\.|Mon\.|Tue\.|Wed\.|Thu\.|Fri\.|Sat\.|Sun\.)$/i.test(w) || /^[A-Za-z]\.$/i.test(w);
           
-          const hasStrong = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
-          const hasWeak = /[,;，；]['"]*$/.test(w);
+          // 标点判定
+          const hasStrongPunctuation = !isAbbr && /[.?!。？！"”]['"]*$/.test(w);
+          const hasWeakPunctuation = /[,;，；]['"]*$/.test(w);
 
-          // 核心更新：严禁跨段落！只要遇到换行符，或者停顿超过 1.0 秒，强制作为段落终点！
-          const isParagraphBreak = /\n/.test(wObj.word) || nextWordGap > 1.0 || (hasStrong && nextWordGap > 0.5);
+          // 核心断句逻辑
+          let shouldSplitChunk = false;
+          let shouldSplitSentence = false;
 
-          let splitChunk = false;
-          let splitSentence = false;
+          // 1. 段落/超长停顿强制切断 (绝不跨段落)
+          const isParagraphBreak = /\n/.test(wObj.word) || nextWordGap > 1.0 || (hasStrongPunctuation && nextWordGap > 0.5);
 
-          // 优先级 1：段落强制阻断
           if (isLastWordOverall || isParagraphBreak) {
-              splitChunk = true;
-              splitSentence = true;
+              shouldSplitChunk = true;
+              shouldSplitSentence = true;
           } 
-          // 优先级 2：正常强标点断句 (防止最后掉队少于3个词)
-          else if (hasStrong && remainingWords >= 3) {
-              splitChunk = true;
-              splitSentence = true;
+          // 2. 强标点断句 (防孤儿词保护：剩余词数 >= 4 才断)
+          else if (hasStrongPunctuation && remainingWords >= 4) {
+              shouldSplitChunk = true;
+              shouldSplitSentence = true;
           } 
-          // 优先级 3：达到 20 词硬上限，切片
-          else if (chunkWordCount >= 20) {
-              splitChunk = true; 
+          // 3. 弱标点断句 (当目前累积较多且剩余足够时，顺势切片)
+          else if (hasWeakPunctuation && chunkWordCount >= 10 && remainingWords >= 4) {
+              shouldSplitChunk = true;
           } 
-          // 优先级 4：弱标点，长于 10 个词顺势切片
-          else if (hasWeak && chunkWordCount >= 10 && remainingWords >= 3) {
-              splitChunk = true; 
+          // 4. 无标点强制保底断句 (达到20词硬上限，且剩余词数 >= 4)
+          else if (chunkWordCount >= 20 && remainingWords >= 4) {
+              shouldSplitChunk = true;
           }
 
-          if (splitChunk) {
+          if (shouldSplitChunk) {
               currentChunk.en = currentChunk.words.join(" ");
               currentSentence.enChunks.push({ ...currentChunk });
               currentChunk = { id: ++chunkIdCounter, start: null, end: null, words: [] };
           }
 
-          if (splitSentence) {
+          if (shouldSplitSentence) {
               currentSentence.en = currentSentence.enChunks.map(c => c.en).join(" ");
               parsedSentences.push({ ...currentSentence });
               currentSentence = { id: parsedSentences.length, blockId: 'block-0', zh: "", en: "", enChunks: [] };
           }
       });
 
+      // 处理最后未闭合的块
+      if (currentChunk.words.length > 0) {
+          currentChunk.en = currentChunk.words.join(" ");
+          currentSentence.enChunks.push({ ...currentChunk });
+      }
+      if (currentSentence.enChunks.length > 0) {
+          currentSentence.en = currentSentence.enChunks.map(c => c.en).join(" ");
+          parsedSentences.push({ ...currentSentence });
+      }
+
       // --- 第 3 步：分批无损翻译与文本对齐校验 ---
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
       
-      // 优化 1：将每批处理的句子数从 15 降低到 8，彻底防止大模型输出 Token 截断导致的“翻译丢失”
+      // 缩小批次：从15降到8，极大降低大模型漏翻概率
       const chunkSize = 8; 
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
@@ -229,38 +302,21 @@ export default function App() {
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
-        // 构造发送给 LLM 的数据：包含整句 ID 和内部 Chunk ID，方便逐层替换
-        const inputData = chunk.map(sent => ({
-            id: sent.id,
-            chunks: sent.enChunks.map(c => ({ id: c.id, en: c.en }))
-        }));
-
-        const modeInstruction = enSource === 'raw' 
-            ? `CRITICAL INSTRUCTION: You MUST replace the "en" text of EACH chunk with the EXACT corresponding text from the RAW REFERENCE. Fix all Whisper speech recognition errors by pulling the exact words from the RAW REFERENCE. Do not alter the number of chunks.`
-            : `You may lightly correct obvious OCR/speech typos in the English chunks.`;
-
-        // 优化 2：在 Prompt 中严厉警告大模型，必须使用标准英文引号，并强制要求不漏掉任何句子
-        const translationPrompt = `You are a professional subtitle translator and alignment expert.
-        1. ${modeInstruction}
-        2. Translate the full sentence into natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
+        // 强化 Prompt，强调不可漏翻
+        const translationPrompt = `You are a professional subtitle translator.
+        1. Correct OCR/speech typos in English using the RAW REFERENCE.
+        2. Translate the full English sentences to natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文).
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
-        4. ABSOLUTELY DO NOT CROSS PARAGRAPHS.
-        5. CRITICAL: Return a VALID JSON OBJECT. Use standard English double quotes (") for all JSON keys and string values. NEVER use Chinese smart quotes (“ or ”) for JSON syntax. If your translation contains quotes, escape them (\\").
-        6. You MUST translate exactly ${chunk.length} sentences. Do not skip any "id".
+        4. CRITICAL: You MUST translate EVERY SINGLE sentence provided. Return EXACTLY ${chunk.length} items mapping exactly to the input "id". Do NOT merge or skip any sentences.
+        5. CONTEXTUAL TRANSLATION: Subtitles are often cut mid-sentence. Look at surrounding segments to understand the full meaning. Ensure the Chinese translation represents the complete grammatical meaning of the sentence.
 
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 1000) : "None."}
-        INPUT JSON: ${JSON.stringify(inputData)}
+        INPUT JSON: ${JSON.stringify(chunk.map(c => ({ id: c.id, en: c.en })))}
 
         OUTPUT MUST BE VALID JSON FORMAT:
         {
           "extractedDate": "...",
-          "subtitles": [ 
-            { 
-               "id": <sentence_id>, 
-               "zh": "Chinese translation of the whole sentence...",
-               "chunks": [ { "id": <chunk_id>, "en": "corrected english text..." } ]
-            } 
-          ]
+          "subtitles": [ { "id": <exact_id>, "zh": "..." } ]
         }`;
 
         let chunkSuccess = false;
@@ -288,70 +344,75 @@ export default function App() {
                 } catch (e) {}
                 
                 if (llmRes.status === 429) throw new Error("429");
-                if (llmRes.status === 402) throw new Error(`402 余额不足`);
-                if (llmRes.status === 401) throw new Error(`401 鉴权失败`);
+                if (llmRes.status === 403) throw new Error(`403 权限受限: 该模型为付费专属或无权限访问。`);
+                if (llmRes.status === 404) throw new Error(`404 模型未找到: 请检查您的 Model 或 Base URL。`);
+                if (llmRes.status === 402) throw new Error(`402 余额不足: 请检查 API 账号额度。`);
+                if (llmRes.status === 401) throw new Error(`401 鉴权失败: API Key 无效。`);
                 throw new Error(`${llmRes.status} 服务器报错: ${errMsg}`);
             }
             
             const llmResult = await llmRes.json();
-            let content = llmResult.choices[0].message.content;
+            const content = llmResult.choices[0].message.content;
             
-            // 优化 3：前端暴力清洗清洗，去除大模型外层的 Markdown 代码块包裹
-            content = content.replace(/^```(json)?\s*/i, '').replace(/```$/i, '').trim();
-            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            // 强力清洗与提取 JSON
+            let cleanContent = content.replace(/^```(json)?\s*/i, '').replace(/```$/i, '').trim();
+            const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
             if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。`);
             
-            let jsonStr = jsonMatch[0];
+            const parsed = JSON.parse(jsonMatch[0]);
+            const transDict = {};
+            (parsed.subtitles || []).forEach(t => transDict[t.id] = t.zh);
             
-            // 优化 4：暴力修复机制，强行把国内大模型错写的全角中文引号 “” 替换回标准英文引号 ""
-            jsonStr = jsonStr.replace(/[“”]([a-zA-Z0-9_]+)[“”]\s*:/g, '"$1":');
-            
-            let parsed;
-            try {
-                parsed = JSON.parse(jsonStr);
-            } catch(parseErr) {
-                throw new Error(`JSON Parse error: ${parseErr.message}`);
-            }
-            
-            // 将修正后的文本和翻译映射回去
+            // 校验漏翻并映射
+            let missingTranslation = false;
             chunk.forEach(sent => {
-                const updatedSent = (parsed.subtitles || []).find(s => s.id === sent.id);
-                if (updatedSent) {
-                    sent.zh = updatedSent.zh || "（翻译失败）";
-                    if (updatedSent.chunks) {
-                        sent.enChunks.forEach(c => {
-                            const updatedChunk = updatedSent.chunks.find(uc => uc.id === c.id);
-                            if (updatedChunk && updatedChunk.en) {
-                                c.en = updatedChunk.en;
-                            }
-                        });
-                        sent.en = sent.enChunks.map(c => c.en).join(" ");
-                    }
-                } else {
-                    sent.zh = "（大模型未返回此段翻译）";
+                if (!transDict[sent.id] || transDict[sent.id].trim() === "") {
+                    missingTranslation = true;
                 }
+                sent.zh = transDict[sent.id] || "（大模型漏翻，可重试）";
             });
+
+            // 触发漏翻重试
+            if (missingTranslation && retryCount < maxRetries - 1) {
+                console.warn("检测到大模型漏翻，触发重试...");
+                throw new Error("模型漏翻");
+            }
 
             if (isFirstChunk && parsed.extractedDate) extractedDateStr = parsed.extractedDate;
             chunkSuccess = true;
 
           } catch (e) {
-            console.error("批次异常:", e);
+            console.error("当前批次翻译异常:", e);
+            
             if (e.message === "429") {
                 retryCount++;
-                setProcessMsg(`触发 429 限流，等待 ${retryCount * 5} 秒重试...`);
+                setProcessMsg(`大模型接口繁忙 (429限流)，等待 ${retryCount * 5} 秒后重试...`);
                 await delay(5000 * retryCount);
                 continue;
             }
+            
+            let displayError = e.message;
+            if (e.name === "TypeError" && e.message.includes("fetch")) {
+                displayError = "网络断开或跨域拦截，请检查代理";
+            }
+            
             if (retryCount >= maxRetries - 1) {
-                chunk.forEach(sent => { sent.zh = `【请求失败】${e.message}`; });
+                chunk.forEach(sent => { 
+                    if (!sent.zh || sent.zh === "（大模型漏翻，可重试）") {
+                        sent.zh = `【请求失败】${displayError}`; 
+                    }
+                });
                 break;
             }
             retryCount++;
+            setProcessMsg(`翻译异常 [${displayError}]，正在重试 (${retryCount}/${maxRetries})...`);
             await delay(3000);
           }
         }
-        if (i + chunkSize < parsedSentences.length) await delay(2000);
+        
+        if (i + chunkSize < parsedSentences.length) {
+            await delay(2000);
+        }
       }
 
       setNewsDate(extractedDateStr || getFormattedDate());
@@ -413,24 +474,33 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 原生直驱播放防护 =================
+  // ================= 真正的同步直驱播放防护 =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
-      if (!audioRef.current || isExportingVideo || sentences.length === 0) return;
       
-      if (!audioRef.current.paused) {
-          audioRef.current.pause();
+      const audio = audioRef.current;
+      
+      if (!formData.audioUrl) {
+          return alert("请先上传音频文件！");
+      }
+      if (!audio || isExportingVideo) return;
+      
+      if (!audio.paused) {
+          audio.pause();
           setIsPlaying(false);
       } else {
-          if (audioRef.current.currentTime >= (formData.audioDuration || audioRef.current.duration) - 0.1 || audioRef.current.ended) {
-              audioRef.current.currentTime = 0;
+          if (audio.currentTime >= (formData.audioDuration || audio.duration) - 0.1 || audio.ended) {
+              audio.currentTime = 0;
               setCurrentTime(0);
           }
-          const playPromise = audioRef.current.play();
+          
+          const playPromise = audio.play();
           if (playPromise !== undefined) {
-              playPromise.then(() => setIsPlaying(true)).catch(err => {
-                  console.error("播放拦截:", err);
-                  alert("播放被浏览器拦截。请确保您已在网页交互。");
+              playPromise.then(() => {
+                  setIsPlaying(true);
+              }).catch(err => {
+                  console.error("播放被拦截:", err);
+                  alert("播放被浏览器拦截。请确保您已在网页点击任意位置完成交互。");
                   setIsPlaying(false);
               });
           } else {
@@ -528,10 +598,11 @@ export default function App() {
 
       try {
           if (!canvas.captureStream) {
-             throw new Error("您的浏览器不支持 Canvas 视频流捕获。请尝试使用 Chrome 浏览器。");
+             throw new Error("您的浏览器不支持 Canvas 视频流捕获。请尝试使用最新版 Chrome 浏览器。");
           }
 
           const canvasStream = canvas.captureStream(30);
+          
           const audio = new Audio(formData.audioUrl);
           audio.crossOrigin = "anonymous";
           const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -541,8 +612,20 @@ export default function App() {
           source.connect(dest);
           source.connect(audioCtx.destination); 
           
-          const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
-          const supportedMimeTypes = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm', ''];
+          const audioTracks = dest.stream.getAudioTracks();
+          const combinedTracks = [
+              ...canvasStream.getVideoTracks(),
+              ...audioTracks
+          ];
+          const combinedStream = new MediaStream(combinedTracks);
+
+          const supportedMimeTypes = [
+              'video/mp4',
+              'video/webm;codecs=vp9',
+              'video/webm;codecs=vp8',
+              'video/webm',
+              '' 
+          ];
           
           let options = {};
           for (let type of supportedMimeTypes) {
@@ -553,7 +636,10 @@ export default function App() {
           }
 
           mediaRecorder = new MediaRecorder(combinedStream, options);
-          mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
+          
+          mediaRecorder.ondataavailable = (e) => {
+              if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+          };
           
           mediaRecorder.onstop = () => {
               const type = options.mimeType || 'video/mp4';
@@ -589,6 +675,7 @@ export default function App() {
 
               let activeSentence = null;
               let activeChunk = null;
+              let activeZhChunkText = "";
 
               for (let i = 0; i < sentences.length; i++) {
                   const sent = sentences[i];
@@ -599,6 +686,23 @@ export default function App() {
                   if (time >= sentStart && time <= sentEnd) {
                       activeSentence = sent;
                       activeChunk = sent.enChunks.find(c => time >= c.start && time <= c.end);
+                      
+                      const zhChunksText = splitChineseText(sent.zh);
+                      if (zhChunksText.length > 0) {
+                          const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
+                          const duration = sentEnd - sentStart;
+                          let t = sentStart;
+                          let found = false;
+                          for (let j = 0; j < zhChunksText.length; j++) {
+                              const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
+                              if (time >= t && time <= t + chunkDur) {
+                                  activeZhChunkText = zhChunksText[j];
+                                  found = true; break;
+                              }
+                              t += chunkDur;
+                          }
+                          if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
+                      }
                       break;
                   }
               }
@@ -624,7 +728,7 @@ export default function App() {
                   ctx.fillRect(0, imgY, 1080, imgH);
               }
 
-              // 视频字幕高度基准渲染计算
+              // ================= 视频字幕高度基准渲染计算 =================
               if (activeSentence) {
                   const boxWidth = 960;
                   const boxX = 60;
@@ -644,7 +748,9 @@ export default function App() {
                           if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
                               simLine = tokens[n];
                               simY += 65;
-                          } else { simLine = testLine; }
+                          } else {
+                              simLine = testLine;
+                          }
                       }
                       const h = (simY - enBoxY) + 50;
                       if (h > maxEnBoxHeight) maxEnBoxHeight = h;
@@ -655,7 +761,8 @@ export default function App() {
                   ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)';
                   ctx.lineWidth = 3;
                   drawRoundRect(ctx, boxX, enBoxY, boxWidth, enBoxHeight, 24);
-                  ctx.fill(); ctx.stroke();
+                  ctx.fill();
+                  ctx.stroke();
 
                   ctx.fillStyle = '#ffffff';
                   ctx.textAlign = 'left';
@@ -663,27 +770,36 @@ export default function App() {
 
                   const zhBoxY = enBoxY + enBoxHeight + 40;
                   ctx.font = 'bold 42px sans-serif';
+                  let maxZhBoxHeight = 0;
+                  const zhChunksList = splitChineseText(activeSentence.zh);
+                  const zhChunksToMeasure = zhChunksList.length > 0 ? zhChunksList : [activeSentence.zh];
                   
-                  // 直接使用整句中文渲染
-                  let zhSimY = zhBoxY + 65;
-                  const zhTokens = activeSentence.zh.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || activeSentence.zh.split('');
-                  let zhSimLine = '';
-                  for (let n = 0; n < zhTokens.length; n++) {
-                      const testLine = zhSimLine + zhTokens[n];
-                      if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
-                          zhSimLine = zhTokens[n];
-                          zhSimY += 60;
-                      } else { zhSimLine = testLine; }
-                  }
-                  const zhBoxHeight = (zhSimY - zhBoxY) + 45;
+                  zhChunksToMeasure.forEach(chunk => {
+                      let zhSimY = zhBoxY + 65;
+                      const zhTokens = chunk.match(/[\u4e00-\u9fa5]|[\w\.\,\!\?\-\']+|\s+/g) || chunk.split('');
+                      let zhSimLine = '';
+                      for (let n = 0; n < zhTokens.length; n++) {
+                          const testLine = zhSimLine + zhTokens[n];
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && zhTokens[n].trim() !== '') {
+                              zhSimLine = zhTokens[n];
+                              zhSimY += 60;
+                          } else {
+                              zhSimLine = testLine;
+                          }
+                      }
+                      const h = (zhSimY - zhBoxY) + 45;
+                      if (h > maxZhBoxHeight) maxZhBoxHeight = h;
+                  });
+                  const zhBoxHeight = maxZhBoxHeight;
 
                   ctx.fillStyle = 'rgba(66, 133, 244, 0.9)'; 
                   ctx.strokeStyle = 'rgba(66, 133, 244, 0.5)';
                   drawRoundRect(ctx, boxX, zhBoxY, boxWidth, zhBoxHeight, 24);
-                  ctx.fill(); ctx.stroke();
+                  ctx.fill();
+                  ctx.stroke();
 
                   ctx.fillStyle = '#ffffff';
-                  wrapTextCanvas(ctx, activeSentence.zh, textX, zhBoxY + 65, textMaxWidth, 60);
+                  wrapTextCanvas(ctx, activeZhChunkText || activeSentence.zh, textX, zhBoxY + 65, textMaxWidth, 60);
               }
 
               animationId = requestAnimationFrame(drawFrame);
@@ -695,12 +811,15 @@ export default function App() {
           });
           drawFrame();
 
-          audio.onended = () => { mediaRecorder.stop(); };
+          audio.onended = () => {
+              mediaRecorder.stop();
+          };
 
       } catch (e) {
           console.error(e);
-          alert(`导出失败: ${e.message}`);
-          setIsExportingVideo(false); cancelAnimationFrame(animationId);
+          alert(`导出失败: ${e.message}\n如果持续失败，建议使用 Chrome 浏览器进行视频导出操作。`);
+          setIsExportingVideo(false);
+          cancelAnimationFrame(animationId);
       }
   };
 
@@ -726,6 +845,7 @@ export default function App() {
 
     let activeSentence = null;
     let activeChunk = null;
+    let activeZhChunkText = "";
     
     for (let i = 0; i < sentences.length; i++) {
         const sent = sentences[i];
@@ -736,6 +856,24 @@ export default function App() {
         if (currentTime >= sentStart && currentTime <= sentEnd) {
             activeSentence = sent;
             activeChunk = sent.enChunks.find(c => currentTime >= c.start && currentTime <= c.end);
+            
+            const zhChunksText = splitChineseText(sent.zh);
+            if (zhChunksText.length > 0) {
+                const totalChars = zhChunksText.reduce((acc, c) => acc + c.length, 0);
+                const duration = sentEnd - sentStart;
+                let t = sentStart;
+                let found = false;
+                for (let j = 0; j < zhChunksText.length; j++) {
+                    const chunkDur = totalChars > 0 ? (zhChunksText[j].length / totalChars) * duration : 0;
+                    if (currentTime >= t && currentTime <= t + chunkDur) {
+                        activeZhChunkText = zhChunksText[j];
+                        found = true;
+                        break;
+                    }
+                    t += chunkDur;
+                }
+                if (!found) activeZhChunkText = zhChunksText[zhChunksText.length - 1];
+            }
             break;
         }
     }
@@ -763,6 +901,9 @@ export default function App() {
         }
     }
 
+    const zhChunksTextList = activeSentence ? splitChineseText(activeSentence.zh) : [];
+    const activeZhChunkToDisplay = activeZhChunkText || (activeSentence ? activeSentence.zh : "");
+
     return (
       <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={togglePlay}>
         <div className="flex-none pt-14 pb-4 flex flex-col items-center justify-center text-white px-6 text-center z-10">
@@ -777,7 +918,7 @@ export default function App() {
              ) : (
                 <div className="text-gray-500 flex flex-col items-center opacity-60">
                    <ImageIcon size={32} className="mb-2" />
-                   <span className="text-xs">等待上传配图</span>
+                   <span className="text-xs">等待人工上传配图</span>
                 </div>
              )}
              
@@ -795,20 +936,33 @@ export default function App() {
               <>
                 <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 transform transition-all duration-300 grid">
                   <div className="col-start-1 row-start-1 p-4 opacity-0 pointer-events-none select-none">
-                    <p className="font-semibold text-lg leading-relaxed text-left">{longestChunkEn}</p>
+                    <p className="font-semibold text-lg leading-relaxed text-left">
+                      {longestChunkEn}
+                    </p>
                   </div>
                   {activeSentence.enChunks.map((chunk, cIdx) => (
                     <div key={chunk.id || cIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${displayEnChunk === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
-                      <p className="text-white font-semibold text-lg leading-relaxed text-left">{chunk.en}</p>
+                      <p className="text-white font-semibold text-lg leading-relaxed text-left">
+                        {chunk.en}
+                      </p>
                     </div>
                   ))}
                 </div>
 
                 <div className="w-full bg-[#4285F4]/90 backdrop-blur-md rounded-xl border border-[#4285F4]/50 transform transition-all duration-300 shadow-lg grid">
-                  <div className="col-start-1 row-start-1 p-4 flex items-start justify-start opacity-100 z-10">
-                     {/* 中文不再自动切割，完整显示整句确保连贯性 */}
-                     <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">{activeSentence.zh}</p>
-                  </div>
+                  {zhChunksTextList.length > 0 ? zhChunksTextList.map((zhChunk, zIdx) => (
+                    <div key={zIdx} className={`col-start-1 row-start-1 p-4 flex items-start justify-start transition-opacity duration-200 ${activeZhChunkToDisplay === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
+                        {zhChunk}
+                      </p>
+                    </div>
+                  )) : (
+                    <div className="col-start-1 row-start-1 p-4 flex items-start justify-start opacity-100 z-10">
+                      <p className="text-white font-bold text-[16px] leading-relaxed text-left drop-shadow-md">
+                        {activeSentence.zh}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </>
             ) : null}
@@ -838,12 +992,12 @@ export default function App() {
           <div className="p-8 max-w-3xl mx-auto w-full space-y-8 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">支持独立双轨时间轴，整句无损翻译，严禁跨段落，纯净直驱播放。</p>
+              <p className="text-sm text-gray-500 mt-2">支持独立双轨时间轴，整句无损翻译，无初始配图纯净流。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
-                <label className="text-sm font-bold text-gray-800 flex items-center"><Mic size={16} className="mr-2 text-blue-500" />Whisper 语音解析</label>
+                <label className="text-sm font-bold text-gray-800 flex items-center"><Mic size={16} className="mr-2 text-blue-500" />Whisper 语音解析接口</label>
                 <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url', e.target.value); }} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
                 <div className="flex space-x-2">
                   <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-blue-500" />
@@ -852,8 +1006,8 @@ export default function App() {
               </div>
 
               <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-sm space-y-3">
-                <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v5', e.target.value); }} className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
+                <label className="text-sm font-bold text-gray-800 flex items-center"><MessageSquare size={16} className="mr-2 text-purple-500" />LLM 文本纠错翻译接口</label>
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v5', e.target.value); }} placeholder="例如: https://open.bigmodel.cn/api/paas/v4" className="w-full border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                 <div className="flex space-x-2">
                   <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
                   <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v5', e.target.value); }} className="w-1/2 border rounded-lg px-3 py-2 text-sm bg-gray-50 outline-none focus:ring-2 focus:ring-purple-500" />
@@ -862,30 +1016,8 @@ export default function App() {
             </div>
 
             <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-6">
-              
-              {/* 英文字幕来源切换开关 */}
-              <div className="space-y-2 pb-4 border-b border-gray-100">
-                <label className="text-sm font-bold text-gray-800 mb-2 block flex items-center">
-                  <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">0</span>
-                  英文字幕来源
-                </label>
-                <div className="flex items-center space-x-6 pl-7">
-                  <label className="flex items-center space-x-2 cursor-pointer text-sm">
-                    <input type="radio" value="ai" checked={enSource === 'ai'} onChange={() => setEnSource('ai')} className="w-4 h-4 text-blue-600 focus:ring-blue-500" />
-                    <span>以 AI 识别为准</span>
-                  </label>
-                  <label className="flex items-center space-x-2 cursor-pointer text-sm">
-                    <input type="radio" value="raw" checked={enSource === 'raw'} onChange={() => setEnSource('raw')} className="w-4 h-4 text-blue-600 focus:ring-blue-500" />
-                    <span>以粘贴的原文字幕为准 (强制对齐)</span>
-                  </label>
-                </div>
-              </div>
-
               <div>
-                <label className="text-sm font-bold text-gray-800 mb-2 block flex items-center">
-                    <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">1</span>
-                    上传主音频
-                </label>
+                <label className="text-sm font-bold text-gray-800 mb-2 block">1. 上传主音频 (必须)</label>
                 <div className="border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 hover:bg-gray-100 p-8 flex flex-col items-center relative overflow-hidden transition-colors">
                   {formData.audioName ? 
                     <div className="text-center"><FileAudio size={40} className="text-blue-500 mx-auto mb-3" /><p className="font-medium text-gray-700">{formData.audioName}</p></div> : 
@@ -902,11 +1034,8 @@ export default function App() {
               </div>
 
               <div>
-                <label className="text-sm font-bold text-gray-800 mb-2 block flex items-center">
-                    <span className="bg-gray-200 text-gray-700 w-5 h-5 rounded-full flex items-center justify-center text-xs mr-2">2</span>
-                    粘贴参考原稿 (用于{enSource === 'raw' ? '强制对齐替换' : '纠错'}及提取日期)
-                </label>
-                <textarea className="w-full h-24 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="在此粘贴原版英文文本，确保段落间有空行以便精准阻断..."></textarea>
+                <label className="text-sm font-bold text-gray-800 mb-2 block">2. 粘贴参考原稿 (用于纠错及提取日期)</label>
+                <textarea className="w-full h-24 p-3 text-sm border border-gray-300 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="在此粘贴原版英文文本..."></textarea>
               </div>
             </div>
             
@@ -1046,7 +1175,7 @@ export default function App() {
         onTimeUpdate={handleTimeUpdate} 
         onLoadedMetadata={(e) => setFormData(prev => ({...prev, audioDuration: e.target.duration}))}
         onEnded={() => setIsPlaying(false)}
-        className="hidden" 
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none', display: 'block' }}
       />
       
       {/* 隐藏的离屏 Canvas 用于视频渲染导出 */}
