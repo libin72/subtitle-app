@@ -39,7 +39,6 @@ const getParagraphBreaks = (allWords, rawText) => {
     const breaks = new Set();
     if (!rawText) return breaks;
 
-    // 仅保留字母、数字和最重要的“换行符”用于段落定位
     let textTracker = rawText.toLowerCase().replace(/[^a-z0-9\n]/g, '');
     let currentSearchPos = 0;
 
@@ -47,7 +46,6 @@ const getParagraphBreaks = (allWords, rawText) => {
         const w = allWords[i].word.toLowerCase().replace(/[^a-z0-9]/g, '');
         if (!w) continue;
 
-        // 在限定窗口内向后搜索，防错位
         const searchWindow = textTracker.substring(currentSearchPos, currentSearchPos + 100);
         const localIdx = searchWindow.indexOf(w);
 
@@ -55,7 +53,6 @@ const getParagraphBreaks = (allWords, rawText) => {
             const globalIdx = currentSearchPos + localIdx;
             const textBetween = textTracker.substring(currentSearchPos, globalIdx);
 
-            // 如果两个识别到的单词之间在原稿中存在换行符，说明跨段落了！
             if (textBetween.includes('\n')) {
                 if (i > 0) breaks.add(i - 1);
             }
@@ -81,7 +78,6 @@ const buildSubtitleStructures = (allWords, rawText) => {
         const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
         
         const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
-        // 如果有原稿，绝对服从原稿的换行；如果没有原稿，才用 1.5 秒停顿作为降级判断
         const isParaBreak = pBreaks.has(i) || (nextGap > 1.5 && !rawText); 
         
         if (isStrongPunct || isParaBreak || i === allWords.length - 1) {
@@ -138,7 +134,6 @@ const buildSubtitleStructures = (allWords, rawText) => {
             });
         }
         
-        // 发现段落终止符，强制切换到下一个 Block
         if (sentData.isBlockEnd) {
             currentBlockIdx++;
         }
@@ -165,23 +160,24 @@ const splitChineseText = (text) => {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 export default function App() {
+  // 统一全局使用 Groq API 节点
   const [audioBaseUrl, setAudioBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [audioKey, setAudioKey] = useState('');
   const [audioModel, setAudioModel] = useState('whisper-large-v3');
   
-  const [textBaseUrl, setTextBaseUrl] = useState('https://open.bigmodel.cn/api/paas/v4');
+  const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('glm-4-flash');
+  const [textModel, setTextModel] = useState('llama3-70b-8192');
 
   const [isEnSourceRaw, setIsEnSourceRaw] = useState(false);
 
   useEffect(() => {
-    if (localStorage.getItem('wx_audio_url_v_final')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_final'));
-    if (localStorage.getItem('wx_audio_key_v_final')) setAudioKey(localStorage.getItem('wx_audio_key_v_final'));
-    if (localStorage.getItem('wx_audio_model_v_final')) setAudioModel(localStorage.getItem('wx_audio_model_v_final'));
-    if (localStorage.getItem('wx_text_url_v_final')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_final'));
-    if (localStorage.getItem('wx_text_key_v_final')) setTextKey(localStorage.getItem('wx_text_key_v_final'));
-    if (localStorage.getItem('wx_text_model_v_final')) setTextModel(localStorage.getItem('wx_text_model_v_final'));
+    if (localStorage.getItem('wx_audio_url_v_groq')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_groq'));
+    if (localStorage.getItem('wx_audio_key_v_groq')) setAudioKey(localStorage.getItem('wx_audio_key_v_groq'));
+    if (localStorage.getItem('wx_audio_model_v_groq')) setAudioModel(localStorage.getItem('wx_audio_model_v_groq'));
+    if (localStorage.getItem('wx_text_url_v_groq')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_groq'));
+    if (localStorage.getItem('wx_text_key_v_groq')) setTextKey(localStorage.getItem('wx_text_key_v_groq'));
+    if (localStorage.getItem('wx_text_model_v_groq')) setTextModel(localStorage.getItem('wx_text_model_v_groq'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -226,7 +222,7 @@ export default function App() {
 
   const startProcessing = async () => {
     if (!formData.audioUrl) return alert("请上传音频文件！");
-    if (!audioKey || !textKey) return alert("请完善 API 密钥！");
+    if (!audioKey || !textKey) return alert("请完善 API 密钥 (语音与翻译都需要配置)！");
     
     setIsProcessing(true);
     setSentences([]);
@@ -238,7 +234,7 @@ export default function App() {
     }
     
     try {
-      setProcessMsg("1. 正在进行高精度音频识别与对齐...");
+      setProcessMsg("1. 正在通过 Groq 全局节点进行高精度音频识别与对齐...");
       const whisperUrl = `${audioBaseUrl.trim().replace(/\/+$/, '')}/audio/transcriptions`;
       const audioData = new FormData();
       audioData.append('file', formData.audioFile);
@@ -251,7 +247,7 @@ export default function App() {
         headers: { 'Authorization': `Bearer ${audioKey}` },
         body: audioData
       }).catch(err => {
-          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请检查代理设置或接口服务。");
+          throw new Error("网络断开或遭遇浏览器 CORS 跨域拦截，请确保已开启全局 VPN 代理。");
       });
 
       if (!whisperRes.ok) {
@@ -286,7 +282,6 @@ export default function App() {
       setProcessMsg("2. 启动原稿严格对齐引擎划分新闻段落...");
       const parsedSentences = buildSubtitleStructures(allWords, formData.rawText);
 
-      // 根据严格划断的句子自动创建对应的 Block (媒体段落)
       const uniqueBlocks = [...new Set(parsedSentences.map(s => s.blockId))];
       const initialBlocks = uniqueBlocks.map((bId, idx) => ({
           id: bId,
@@ -300,7 +295,7 @@ export default function App() {
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
-        setProcessMsg(`3. LLM 双语意译同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
+        setProcessMsg(`3. Llama3 模型双语意译同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
@@ -332,7 +327,8 @@ export default function App() {
               body: JSON.stringify({
                 model: textModel.trim(),
                 messages: [{ role: 'user', content: translationPrompt }],
-                temperature: 0.1
+                temperature: 0.1,
+                response_format: { type: "json_object" } // 强制 Groq 输出合法 JSON
               })
             });
 
@@ -396,7 +392,6 @@ export default function App() {
       setNewsDate(extractedDateStr || getFormattedDate());
       setProcessMsg("4. 装载双轨媒体池与防跳动网格...");
       
-      // 应用生成好的严格 Blocks
       setBlocks(initialBlocks);
 
       setTimeout(() => {
@@ -412,7 +407,7 @@ export default function App() {
     }
   };
 
-  // ================= 极速手动微调系统 (中文同步割裂重构版) =================
+  // ================= 极速手动微调系统 =================
   const handleMergeSentenceUp = (sentIdx) => {
     setSentences(prev => {
         if (sentIdx <= 0) return prev;
@@ -420,7 +415,7 @@ export default function App() {
         const prevSent = newSentences[sentIdx - 1];
         const curSent = newSentences[sentIdx];
 
-        if (prevSent.blockId !== curSent.blockId) return prev; // 严禁跨段落合并
+        if (prevSent.blockId !== curSent.blockId) return prev; 
 
         const mergedSent = {
             ...prevSent,
@@ -476,7 +471,6 @@ export default function App() {
             const textB = targetChunk.en.substring(cursorIdx).trim();
             if (!textA || !textB) return prev;
             
-            // 计算时间戳断点
             const ratio = textA.length / (textA.length + textB.length);
             const duration = targetChunk.end - targetChunk.start;
             const midTime = targetChunk.start + duration * ratio;
@@ -484,11 +478,9 @@ export default function App() {
             const chunkA = { ...targetChunk, id: targetChunk.id + '_a_' + Date.now(), en: textA, end: midTime };
             const chunkB = { ...targetChunk, id: targetChunk.id + '_b_' + Date.now(), en: textB, start: midTime };
             
-            // 核心修复：连同外层包裹的整个中文翻译句一起劈开！
             const sentStart = chunks[0].start;
             const sentEnd = chunks[chunks.length - 1].end;
             const sentDur = sentEnd - sentStart;
-            // 计算当前切割点在整个巨型句子中的总时间进度比例
             const absoluteSplitRatio = sentDur > 0 ? (midTime - sentStart) / sentDur : 0.5;
             
             const zhLength = sent.zh.length;
@@ -513,7 +505,6 @@ export default function App() {
             };
             sentB.en = sentB.chunks.map(c => c.en).join(" ");
 
-            // 用劈开的两个中英完全独立的新句，替换掉原来的老句
             newSentences.splice(sentIdx, 1, sentA, sentB);
             return newSentences;
         });
@@ -523,7 +514,6 @@ export default function App() {
             if (cIdx > 0) {
                 handleMergeChunkUp(sentIdx, cIdx);
             } else if (sentIdx > 0) {
-                // 如果光标在句首，按下退格直接呼叫超级向上合并
                 handleMergeSentenceUp(sentIdx);
             }
         }
@@ -570,7 +560,6 @@ export default function App() {
     setBlocks(prev => prev.map(b => b.id === blockId ? { ...b, title: newTitle } : b));
   };
 
-  // ================= 彻底同步防拦截的原生播放系统 =================
   const togglePlay = (e) => {
       if (e && e.stopPropagation) e.stopPropagation();
       const audio = audioRef.current;
@@ -626,7 +615,6 @@ export default function App() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  // ================= 兼容 Mac 原生硬件 Canvas 的视频渲染引擎 =================
   const wrapTextCanvas = (ctx, text, x, y, maxWidth, lineHeight) => {
       if (!text) return y;
       let line = '';
@@ -707,7 +695,6 @@ export default function App() {
 
               ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 1080, 1920);
               
-              // Header
               ctx.fillStyle = '#ffffff'; ctx.font = 'bold 120px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('KidNuz', 540, 150);
               ctx.fillStyle = '#facc15'; ctx.font = '500 45px sans-serif'; ctx.fillText(newsDate || getFormattedDate(), 540, 220);
 
@@ -809,7 +796,6 @@ export default function App() {
       }
   };
 
-  // ================= 纯净的排版渲染 =================
   const renderPhoneScreen = () => {
     if (isProcessing) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-white p-6"><Loader2 size={40} className="animate-spin text-[#4285F4] mb-4" /><p className="text-sm">{processMsg}</p></div>;
     if (sentences.length === 0) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-gray-500 p-6 text-center"><ImageIcon size={48} className="opacity-50 mb-4" /><p className="text-sm">上传剧本，开启全屏工作流</p></div>;
@@ -908,25 +894,25 @@ export default function App() {
           <div className="p-8 max-w-3xl mx-auto w-full space-y-6 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">支持极速键盘流断句的专业播报级工作流。</p>
+              <p className="text-sm text-gray-500 mt-2">全局接驳 Groq 高速通道，彻底消除双轨断连风险。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
-                <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 节点</label>
-                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_final', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 语音节点 (Groq)</label>
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
 
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
-                <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译引擎 (智谱免翻墙)</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_final', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译与对齐节点 (Groq)</label>
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_final', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
             </div>
@@ -963,7 +949,7 @@ export default function App() {
             
             <button onClick={startProcessing} disabled={isProcessing} className="w-full bg-[#4285F4] text-white rounded-xl py-3.5 font-bold text-base hover:bg-blue-600 transition-all shadow flex items-center justify-center disabled:opacity-50">
               {isProcessing ? <Loader2 className="animate-spin mr-2" size={18} /> : <Play className="mr-2" size={18} />}
-              {isProcessing ? "合成引掣运转中..." : "启动无损切片解析"}
+              {isProcessing ? "全局引擎协同运转中..." : "启动无损切片解析"}
             </button>
           </div>
         </div>
@@ -1034,7 +1020,7 @@ export default function App() {
                                         </button>
                                     )}
                                 </div>
-                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-xs font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[30px]" placeholder="等待智谱引擎接入中文意译..." />
+                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-xs font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[30px]" placeholder="等待引擎接入中文意译..." />
                               </div>
 
                               <div className="p-2 space-y-1.5">
