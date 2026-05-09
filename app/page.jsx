@@ -34,36 +34,72 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 智能断句与排版算法 (防 Orphan, 缩略语过滤, 20词上限) =================
+// ================= 核心：原稿段落严格映射算法 =================
+const getParagraphBreaks = (allWords, rawText) => {
+    const breaks = new Set();
+    if (!rawText) return breaks;
+
+    // 仅保留字母、数字和最重要的“换行符”用于段落定位
+    let textTracker = rawText.toLowerCase().replace(/[^a-z0-9\n]/g, '');
+    let currentSearchPos = 0;
+
+    for (let i = 0; i < allWords.length; i++) {
+        const w = allWords[i].word.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!w) continue;
+
+        // 在限定窗口内向后搜索，防错位
+        const searchWindow = textTracker.substring(currentSearchPos, currentSearchPos + 100);
+        const localIdx = searchWindow.indexOf(w);
+
+        if (localIdx !== -1) {
+            const globalIdx = currentSearchPos + localIdx;
+            const textBetween = textTracker.substring(currentSearchPos, globalIdx);
+
+            // 如果两个识别到的单词之间在原稿中存在换行符，说明跨段落了！
+            if (textBetween.includes('\n')) {
+                if (i > 0) breaks.add(i - 1);
+            }
+            currentSearchPos = globalIdx + w.length;
+        }
+    }
+    return breaks;
+};
+
+// ================= 智能断句与排版算法 (融合原稿段落强制切分) =================
 const buildSubtitleStructures = (allWords, rawText) => {
     const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
     const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
 
+    const pBreaks = getParagraphBreaks(allWords, rawText);
+
     let sentences = [];
     let curSentenceWords = [];
     
-    // 第一步：根据强标点和段落划分【翻译基准长句】
     allWords.forEach((wObj, i) => {
         curSentenceWords.push(wObj);
         const wText = wObj.word.trim();
         const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
         
         const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
-        // 强化段落防火墙：停顿超过 1.0 秒或有换行符强制斩断，绝不跨段落
-        const isParagraphBreak = /\n/.test(wText) || nextGap > 1.0;
+        // 如果有原稿，绝对服从原稿的换行；如果没有原稿，才用 1.5 秒停顿作为降级判断
+        const isParaBreak = pBreaks.has(i) || (nextGap > 1.5 && !rawText); 
         
-        if (isStrongPunct || isParagraphBreak || i === allWords.length - 1) {
-            sentences.push([...curSentenceWords]);
+        if (isStrongPunct || isParaBreak || i === allWords.length - 1) {
+            sentences.push({
+                words: [...curSentenceWords],
+                isBlockEnd: isParaBreak
+            });
             curSentenceWords = [];
         }
     });
 
     let parsedSentences = [];
+    let currentBlockIdx = 0;
     
-    // 第二步：将长句内部按照 20词 / 标点 划分为【屏幕显示切片 Chunks】
-    sentences.forEach((sentWords, sIdx) => {
+    sentences.forEach((sentData, sIdx) => {
         let chunks = [];
         let curChunkWords = [];
+        let sentWords = sentData.words;
         
         for (let i = 0; i < sentWords.length; i++) {
             curChunkWords.push(sentWords[i]);
@@ -77,7 +113,6 @@ const buildSubtitleStructures = (allWords, rawText) => {
             } else if (curChunkWords.length >= 20) {
                 forceSplit = true;
             } else if (curChunkWords.length >= 12 && isWeakPunct && remainingWords >= 4) {
-                // 防孤儿词机制：剩余单词 >= 4 才允许在此处弱断句
                 forceSplit = true; 
             }
             
@@ -95,19 +130,23 @@ const buildSubtitleStructures = (allWords, rawText) => {
         
         if (chunks.length > 0) {
             parsedSentences.push({
-                id: `s_${sIdx}`,
-                blockId: 'block-0',
+                id: `s_${sIdx}_${Date.now()}`,
+                blockId: `block-${currentBlockIdx}`,
                 en: sentWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
                 zh: "",
                 chunks: chunks
             });
+        }
+        
+        // 发现段落终止符，强制切换到下一个 Block
+        if (sentData.isBlockEnd) {
+            currentBlockIdx++;
         }
     });
     
     return parsedSentences;
 };
 
-// ================= 中文按30字上限自适应切片 =================
 const splitChineseText = (text) => {
     if (!text) return [];
     const chunks = [];
@@ -134,7 +173,6 @@ export default function App() {
   const [textKey, setTextKey] = useState('');
   const [textModel, setTextModel] = useState('glm-4-flash');
 
-  // 新增开关：是否强制以人工粘贴的原文为准
   const [isEnSourceRaw, setIsEnSourceRaw] = useState(false);
 
   useEffect(() => {
@@ -186,7 +224,6 @@ export default function App() {
     });
   }, [blocks]);
 
-  // ================= 核心处理逻辑 (含503阻断与400暴力捕获) =================
   const startProcessing = async () => {
     if (!formData.audioUrl) return alert("请上传音频文件！");
     if (!audioKey || !textKey) return alert("请完善 API 密钥！");
@@ -208,7 +245,6 @@ export default function App() {
       audioData.append('model', audioModel.trim());
       audioData.append('response_format', 'verbose_json'); 
       audioData.append('timestamp_granularities[]', 'word'); 
-      // 移除原稿 prompt 投喂，防止 Whisper 产生幻觉
       
       const whisperRes = await fetch(whisperUrl, {
         method: 'POST',
@@ -247,13 +283,19 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      setProcessMsg("2. 正在应用断句排版引擎划分媒体区...");
+      setProcessMsg("2. 启动原稿严格对齐引擎划分新闻段落...");
       const parsedSentences = buildSubtitleStructures(allWords, formData.rawText);
+
+      // 根据严格划断的句子自动创建对应的 Block (媒体段落)
+      const uniqueBlocks = [...new Set(parsedSentences.map(s => s.blockId))];
+      const initialBlocks = uniqueBlocks.map((bId, idx) => ({
+          id: bId,
+          title: `新闻内容段落 ${idx + 1}`,
+          image: ""
+      }));
 
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
-      
-      // 【核心修复】将批次降低到 8，防截断漏翻
       const chunkSize = 8; 
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
@@ -262,7 +304,6 @@ export default function App() {
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
-        // 如果开启强制原文对齐，大模型将额外负责校对并输出正确的 en 文本
         const translationPrompt = `You are a professional subtitle translator.
         1. Contextualize using the RAW REFERENCE provided.
         ${isEnSourceRaw ? '2. CRITICAL: For the "en" field in JSON, you MUST replace the OCR English text with the EXACT matching phrases from the RAW REFERENCE. Fix any typos.' : '2. Translate the full English sentences to natural Chinese.'}
@@ -302,20 +343,12 @@ export default function App() {
                     const errJson = JSON.parse(errRaw);
                     errMsg = errJson.error?.message || errJson.message || errRaw;
                 } catch (e) {}
-                
                 if (llmRes.status === 429) throw new Error("429");
-                if (llmRes.status === 400) throw new Error(`400 格式要求拒绝: ${errMsg}`);
-                if (llmRes.status === 401) throw new Error(`401 鉴权失败/Key无效: ${errMsg}`);
-                if (llmRes.status === 402) throw new Error(`402 账号余额不足: ${errMsg}`);
-                if (llmRes.status === 403) throw new Error(`403 无访问权限: ${errMsg}`);
-                if (llmRes.status === 404) throw new Error(`404 模型不存在: ${errMsg}`);
                 throw new Error(`${llmRes.status} 服务器内部报错: ${errMsg}`);
             }
             
             const llmResult = await llmRes.json();
             let content = llmResult.choices[0].message.content;
-            
-            // 【核心修复】暴力清洗大模型错误的中文双引号
             content = content.replace(/“/g, '"').replace(/”/g, '"');
             
             const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -330,7 +363,6 @@ export default function App() {
                 sent.zh = result.zh || "（防漏译：大模型未生成此句中文，请手动补全）";
                 if (isEnSourceRaw && result.en) {
                     sent.en = result.en;
-                    // 若整体替换了原稿英文，则将第一块 chunk 的文本更新为整体英文，保证显示正确
                     if (sent.chunks && sent.chunks.length > 0) {
                         sent.chunks[0].en = result.en;
                         for (let k = 1; k < sent.chunks.length; k++) sent.chunks[k].en = "";
@@ -349,15 +381,12 @@ export default function App() {
                 await delay(5000 * retryCount);
                 continue;
             }
-            let displayError = e.message;
-            if (e.name === "TypeError" && e.message.includes("fetch")) displayError = "跨域拦截或网络断开";
-            
             if (retryCount >= maxRetries - 1) {
-                chunk.forEach(sent => { sent.zh = `【严重异常】${displayError}`; });
+                chunk.forEach(sent => { sent.zh = `【严重异常】网络受阻`; });
                 break;
             }
             retryCount++;
-            setProcessMsg(`请求受阻 [${displayError}]，尝试重新唤醒通道 (${retryCount}/${maxRetries})...`);
+            setProcessMsg(`请求受阻，尝试重新唤醒通道 (${retryCount}/${maxRetries})...`);
             await delay(3000);
           }
         }
@@ -366,7 +395,9 @@ export default function App() {
 
       setNewsDate(extractedDateStr || getFormattedDate());
       setProcessMsg("4. 装载双轨媒体池与防跳动网格...");
-      setBlocks([{ id: 'block-0', title: '新闻内容段落 1', image: "" }]);
+      
+      // 应用生成好的严格 Blocks
+      setBlocks(initialBlocks);
 
       setTimeout(() => {
         setSentences(parsedSentences);
@@ -381,7 +412,7 @@ export default function App() {
     }
   };
 
-  // ================= 极速手动微调系统 (字幕/时间轴自动同步) =================
+  // ================= 极速手动微调系统 (中文同步割裂重构版) =================
   const handleMergeSentenceUp = (sentIdx) => {
     setSentences(prev => {
         if (sentIdx <= 0) return prev;
@@ -443,10 +474,9 @@ export default function App() {
             
             const textA = targetChunk.en.substring(0, cursorIdx).trim();
             const textB = targetChunk.en.substring(cursorIdx).trim();
-            
             if (!textA || !textB) return prev;
             
-            // 依据切割位置推算时间插值
+            // 计算时间戳断点
             const ratio = textA.length / (textA.length + textB.length);
             const duration = targetChunk.end - targetChunk.start;
             const midTime = targetChunk.start + duration * ratio;
@@ -454,28 +484,58 @@ export default function App() {
             const chunkA = { ...targetChunk, id: targetChunk.id + '_a_' + Date.now(), en: textA, end: midTime };
             const chunkB = { ...targetChunk, id: targetChunk.id + '_b_' + Date.now(), en: textB, start: midTime };
             
-            chunks.splice(cIdx, 1, chunkA, chunkB);
-            sent.chunks = chunks;
-            sent.en = sent.chunks.map(c => c.en).join(" ");
+            // 核心修复：连同外层包裹的整个中文翻译句一起劈开！
+            const sentStart = chunks[0].start;
+            const sentEnd = chunks[chunks.length - 1].end;
+            const sentDur = sentEnd - sentStart;
+            // 计算当前切割点在整个巨型句子中的总时间进度比例
+            const absoluteSplitRatio = sentDur > 0 ? (midTime - sentStart) / sentDur : 0.5;
             
-            newSentences[sentIdx] = sent;
+            const zhLength = sent.zh.length;
+            const absoluteZhSplitIdx = Math.floor(zhLength * absoluteSplitRatio);
+
+            const zhA = sent.zh.substring(0, absoluteZhSplitIdx);
+            const zhB = sent.zh.substring(absoluteZhSplitIdx);
+
+            const sentA = {
+                ...sent,
+                id: sent.id + '_a_' + Date.now(),
+                zh: zhA,
+                chunks: [...chunks.slice(0, cIdx), chunkA],
+            };
+            sentA.en = sentA.chunks.map(c => c.en).join(" ");
+
+            const sentB = {
+                ...sent,
+                id: sent.id + '_b_' + Date.now(),
+                zh: zhB,
+                chunks: [chunkB, ...chunks.slice(cIdx + 1)],
+            };
+            sentB.en = sentB.chunks.map(c => c.en).join(" ");
+
+            // 用劈开的两个中英完全独立的新句，替换掉原来的老句
+            newSentences.splice(sentIdx, 1, sentA, sentB);
             return newSentences;
         });
     } else if (e.key === 'Backspace') {
-        if (e.target.selectionStart === 0 && e.target.selectionEnd === 0 && cIdx > 0) {
+        if (e.target.selectionStart === 0 && e.target.selectionEnd === 0) {
             e.preventDefault();
-            handleMergeChunkUp(sentIdx, cIdx);
+            if (cIdx > 0) {
+                handleMergeChunkUp(sentIdx, cIdx);
+            } else if (sentIdx > 0) {
+                // 如果光标在句首，按下退格直接呼叫超级向上合并
+                handleMergeSentenceUp(sentIdx);
+            }
         }
     }
   };
 
-  // ================= 媒体区段落操作 =================
   const handleSplitAfter = (sentenceId, currentBlockId) => {
     const newBlockId = 'block-' + Date.now();
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
         const newBlocks = [...prev];
-        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `新闻内容段落 ${newBlocks.length + 1}`, image: "" });
+        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `手工额外切分段落`, image: "" });
         return newBlocks;
     });
     setSentences(prev => {
@@ -897,7 +957,7 @@ export default function App() {
                         {isEnSourceRaw ? '英文字幕强制以原文为准 (替换 AI)' : '英文字幕以 AI 语音识别为准'}
                     </button>
                 </div>
-                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文供大模型划分新闻及校对..."></textarea>
+                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文，系统将根据换行符强制生成新闻段落..."></textarea>
               </div>
             </div>
             
@@ -981,7 +1041,7 @@ export default function App() {
                                 <div className="flex items-center justify-between mb-1">
                                     <div className="text-[9px] font-bold text-gray-400">英文强制切分轴</div>
                                     <div className="text-[9px] text-yellow-600 font-medium px-1.5 py-0.5 bg-yellow-50 rounded border border-yellow-100">
-                                        💡 极速微调：框内按 Enter 拆分，行首按 Backspace 向上合并
+                                        💡 极速微调：框内按 Enter 拆分整句，行首按 Backspace 向上合并
                                     </div>
                                 </div>
                                 {sent.chunks.map((chunk, cIdx) => {
@@ -1009,7 +1069,7 @@ export default function App() {
                               <div className="flex justify-center my-1 relative group py-1">
                                 <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
                                 <button onClick={() => handleSplitAfter(sent.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-[#4285F4] group-hover:border-blue-400 group-hover:shadow-sm text-[10px] px-2 py-0.5 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
-                                  <Scissors size={10} className="mr-1" /> 在此向下切分段落 (News Block)
+                                  <Scissors size={10} className="mr-1" /> 在此向下拆出新段落 (News Block)
                                 </button>
                               </div>
                             )}
