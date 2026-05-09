@@ -220,7 +220,8 @@ export default function App() {
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
       
-      const chunkSize = 15; 
+      // 优化 1：将每批处理的句子数从 15 降低到 8，彻底防止大模型输出 Token 截断导致的“翻译丢失”
+      const chunkSize = 8; 
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
@@ -238,12 +239,14 @@ export default function App() {
             ? `CRITICAL INSTRUCTION: You MUST replace the "en" text of EACH chunk with the EXACT corresponding text from the RAW REFERENCE. Fix all Whisper speech recognition errors by pulling the exact words from the RAW REFERENCE. Do not alter the number of chunks.`
             : `You may lightly correct obvious OCR/speech typos in the English chunks.`;
 
+        // 优化 2：在 Prompt 中严厉警告大模型，必须使用标准英文引号，并强制要求不漏掉任何句子
         const translationPrompt = `You are a professional subtitle translator and alignment expert.
         1. ${modeInstruction}
         2. Translate the full sentence into natural Chinese. STRCITLY USE SIMPLIFIED CHINESE (简体中文). DO NOT USE TRADITIONAL CHINESE.
         ${isFirstChunk ? '3. Extract broadcast date if mentioned (e.g. "Wednesday, Oct 11th") to Chinese format (e.g. "10月11日 星期三"). Else return "".' : '3. extractedDate MUST be "".'}
         4. ABSOLUTELY DO NOT CROSS PARAGRAPHS.
-        5. Return a VALID JSON OBJECT.
+        5. CRITICAL: Return a VALID JSON OBJECT. Use standard English double quotes (") for all JSON keys and string values. NEVER use Chinese smart quotes (“ or ”) for JSON syntax. If your translation contains quotes, escape them (\\").
+        6. You MUST translate exactly ${chunk.length} sentences. Do not skip any "id".
 
         RAW REFERENCE: ${formData.rawText ? formData.rawText.substring(0, 1000) : "None."}
         INPUT JSON: ${JSON.stringify(inputData)}
@@ -291,12 +294,24 @@ export default function App() {
             }
             
             const llmResult = await llmRes.json();
-            const content = llmResult.choices[0].message.content;
+            let content = llmResult.choices[0].message.content;
             
+            // 优化 3：前端暴力清洗清洗，去除大模型外层的 Markdown 代码块包裹
+            content = content.replace(/^```(json)?\s*/i, '').replace(/```$/i, '').trim();
             const jsonMatch = content.match(/\{[\s\S]*\}/);
             if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。`);
             
-            const parsed = JSON.parse(jsonMatch[0]);
+            let jsonStr = jsonMatch[0];
+            
+            // 优化 4：暴力修复机制，强行把国内大模型错写的全角中文引号 “” 替换回标准英文引号 ""
+            jsonStr = jsonStr.replace(/[“”]([a-zA-Z0-9_]+)[“”]\s*:/g, '"$1":');
+            
+            let parsed;
+            try {
+                parsed = JSON.parse(jsonStr);
+            } catch(parseErr) {
+                throw new Error(`JSON Parse error: ${parseErr.message}`);
+            }
             
             // 将修正后的文本和翻译映射回去
             chunk.forEach(sent => {
