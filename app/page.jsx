@@ -34,40 +34,10 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 核心：原稿段落严格映射算法 =================
-const getParagraphBreaks = (allWords, rawText) => {
-    const breaks = new Set();
-    if (!rawText) return breaks;
-
-    let textTracker = rawText.toLowerCase().replace(/[^a-z0-9\n]/g, '');
-    let currentSearchPos = 0;
-
-    for (let i = 0; i < allWords.length; i++) {
-        const w = allWords[i].word.toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (!w) continue;
-
-        const searchWindow = textTracker.substring(currentSearchPos, currentSearchPos + 100);
-        const localIdx = searchWindow.indexOf(w);
-
-        if (localIdx !== -1) {
-            const globalIdx = currentSearchPos + localIdx;
-            const textBetween = textTracker.substring(currentSearchPos, globalIdx);
-
-            if (textBetween.includes('\n')) {
-                if (i > 0) breaks.add(i - 1);
-            }
-            currentSearchPos = globalIdx + w.length;
-        }
-    }
-    return breaks;
-};
-
-// ================= 智能断句与排版算法 =================
-const buildSubtitleStructures = (allWords, rawText) => {
+// ================= 智能断句与排版算法 (废除自动分段，增加孤儿词保护) =================
+const buildSubtitleStructures = (allWords) => {
     const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
     const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
-
-    const pBreaks = getParagraphBreaks(allWords, rawText);
 
     let sentences = [];
     let curSentenceWords = [];
@@ -78,19 +48,17 @@ const buildSubtitleStructures = (allWords, rawText) => {
         const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
         
         const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
-        const isParaBreak = pBreaks.has(i) || (nextGap > 1.5 && !rawText); 
         
-        if (isStrongPunct || isParaBreak || i === allWords.length - 1) {
-            sentences.push({
-                words: [...curSentenceWords],
-                isBlockEnd: isParaBreak
-            });
+        // 核心修复：仅当句子长度 >= 3 个单词时，才允许因停顿而断句。防止单一数字/单词被孤立
+        const isLongGap = nextGap > 1.5 && curSentenceWords.length >= 3; 
+        
+        if (isStrongPunct || isLongGap || i === allWords.length - 1) {
+            sentences.push({ words: [...curSentenceWords] });
             curSentenceWords = [];
         }
     });
 
     let parsedSentences = [];
-    let currentBlockIdx = 0;
     
     sentences.forEach((sentData, sIdx) => {
         let chunks = [];
@@ -127,15 +95,11 @@ const buildSubtitleStructures = (allWords, rawText) => {
         if (chunks.length > 0) {
             parsedSentences.push({
                 id: `s_${sIdx}_${Date.now()}`,
-                blockId: `block-${currentBlockIdx}`,
+                blockId: `block-0`, // 全部强行塞入首个大段落，等待用户手工拆分
                 en: sentWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
                 zh: "",
                 chunks: chunks
             });
-        }
-        
-        if (sentData.isBlockEnd) {
-            currentBlockIdx++;
         }
     });
     
@@ -166,18 +130,20 @@ export default function App() {
   
   const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
-  // 核心修复1：默认使用 llama3-8b-8192 获取 5 倍免费吞吐量 (30000 TPM)
-  const [textModel, setTextModel] = useState('llama3-8b-8192');
+  
+  // 核心变更：升级到 llama-3.3-70b-versatile
+  const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
 
   const [isEnSourceRaw, setIsEnSourceRaw] = useState(false);
 
+  // 更新 localStorage 前缀，强制洗掉浏览器的老旧模型报错缓存
   useEffect(() => {
-    if (localStorage.getItem('wx_audio_url_v_groq2')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_groq2'));
-    if (localStorage.getItem('wx_audio_key_v_groq2')) setAudioKey(localStorage.getItem('wx_audio_key_v_groq2'));
-    if (localStorage.getItem('wx_audio_model_v_groq2')) setAudioModel(localStorage.getItem('wx_audio_model_v_groq2'));
-    if (localStorage.getItem('wx_text_url_v_groq2')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_groq2'));
-    if (localStorage.getItem('wx_text_key_v_groq2')) setTextKey(localStorage.getItem('wx_text_key_v_groq2'));
-    if (localStorage.getItem('wx_text_model_v_groq2')) setTextModel(localStorage.getItem('wx_text_model_v_groq2'));
+    if (localStorage.getItem('wx_audio_url_v_groq4')) setAudioBaseUrl(localStorage.getItem('wx_audio_url_v_groq4'));
+    if (localStorage.getItem('wx_audio_key_v_groq4')) setAudioKey(localStorage.getItem('wx_audio_key_v_groq4'));
+    if (localStorage.getItem('wx_audio_model_v_groq4')) setAudioModel(localStorage.getItem('wx_audio_model_v_groq4'));
+    if (localStorage.getItem('wx_text_url_v_groq4')) setTextBaseUrl(localStorage.getItem('wx_text_url_v_groq4'));
+    if (localStorage.getItem('wx_text_key_v_groq4')) setTextKey(localStorage.getItem('wx_text_key_v_groq4'));
+    if (localStorage.getItem('wx_text_model_v_groq4')) setTextModel(localStorage.getItem('wx_text_model_v_groq4'));
   }, []);
   
   const [formData, setFormData] = useState({
@@ -279,15 +245,15 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      setProcessMsg("2. 启动原稿严格对齐引擎划分新闻段落...");
-      const parsedSentences = buildSubtitleStructures(allWords, formData.rawText);
+      setProcessMsg("2. 正在进行基础时间轴切分 (请后续手工切割新闻段落)...");
+      const parsedSentences = buildSubtitleStructures(allWords);
 
-      const uniqueBlocks = [...new Set(parsedSentences.map(s => s.blockId))];
-      const initialBlocks = uniqueBlocks.map((bId, idx) => ({
-          id: bId,
-          title: `新闻内容段落 ${idx + 1}`,
+      // 全部放入唯一初始 Block，等待人工拆分
+      const initialBlocks = [{
+          id: 'block-0',
+          title: `新闻首段 (请在下方手工向下切割新段落)`,
           image: ""
-      }));
+      }];
 
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
@@ -295,7 +261,7 @@ export default function App() {
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
-        setProcessMsg(`3. Llama3 模型双语意译同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
+        setProcessMsg(`3. Llama-3.3-70b 模型双语同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
@@ -371,13 +337,11 @@ export default function App() {
 
           } catch (e) {
             console.error("翻译异常:", e);
-            // 核心修复 2：暴露真实的错误堆栈，替代死板的文案
             let displayError = e.message;
             if (e.name === "TypeError" && e.message.includes("fetch")) {
                 displayError = "VPN路由失败或跨域拦截";
             }
 
-            // 核心修复 3：强化 Groq API 的 429 退避策略
             if (e.message === "429") {
                 retryCount++;
                 setProcessMsg(`触发额度超限保护 (Groq限制)，系统智能休眠 ${retryCount * 10} 秒后自动续传...`);
@@ -533,7 +497,7 @@ export default function App() {
     setBlocks(prev => {
         const idx = prev.findIndex(b => b.id === currentBlockId);
         const newBlocks = [...prev];
-        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `手工额外切分段落`, image: "" });
+        newBlocks.splice(idx + 1, 0, { id: newBlockId, title: `手工划分段落 ${newBlocks.length + 1}`, image: "" });
         return newBlocks;
     });
     setSentences(prev => {
@@ -902,25 +866,25 @@ export default function App() {
           <div className="p-8 max-w-3xl mx-auto w-full space-y-6 flex-1">
             <div className="border-b border-gray-200 pb-4">
               <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
-              <p className="text-sm text-gray-500 mt-2">已全面升级 Groq 高速通道，搭载动态纠错与限流退避系统。</p>
+              <p className="text-sm text-gray-500 mt-2">支持全手工新闻段落切割与 70B 模型精准翻译。</p>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
                 <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 语音节点 (Groq)</label>
-                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq2', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq4', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
 
               <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
                 <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译与对齐节点 (Groq)</label>
-                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq2', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq4', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
                 <div className="flex space-x-2">
-                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
-                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq2', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
                 </div>
               </div>
             </div>
@@ -951,7 +915,7 @@ export default function App() {
                         {isEnSourceRaw ? '英文字幕强制以原文为准 (替换 AI)' : '英文字幕以 AI 语音识别为准'}
                     </button>
                 </div>
-                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文，系统将根据换行符强制生成新闻段落..."></textarea>
+                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文供大模型校对错别字..."></textarea>
               </div>
             </div>
             
