@@ -33,7 +33,33 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 智能断句与排版算法 (已彻底删除自动分段代码) =================
+const getParagraphBreaks = (allWords, rawText) => {
+    const breaks = new Set();
+    if (!rawText) return breaks;
+
+    let textTracker = rawText.toLowerCase().replace(/[^a-z0-9\n]/g, '');
+    let currentSearchPos = 0;
+
+    for (let i = 0; i < allWords.length; i++) {
+        const w = allWords[i].word.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!w) continue;
+
+        const searchWindow = textTracker.substring(currentSearchPos, currentSearchPos + 100);
+        const localIdx = searchWindow.indexOf(w);
+
+        if (localIdx !== -1) {
+            const globalIdx = currentSearchPos + localIdx;
+            const textBetween = textTracker.substring(currentSearchPos, globalIdx);
+
+            if (textBetween.includes('\n')) {
+                if (i > 0) breaks.add(i - 1);
+            }
+            currentSearchPos = globalIdx + w.length;
+        }
+    }
+    return breaks;
+};
+
 const buildSubtitleStructures = (allWords) => {
     const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
     const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
@@ -47,7 +73,6 @@ const buildSubtitleStructures = (allWords) => {
         const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
         
         const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
-        // 只有字数达到3个词以上，且停顿大于1.5秒，才允许在此断句，防止孤儿词
         const isLongGap = nextGap > 1.5 && curSentenceWords.length >= 3; 
         
         if (isStrongPunct || isLongGap || i === allWords.length - 1) {
@@ -93,7 +118,7 @@ const buildSubtitleStructures = (allWords) => {
         if (chunks.length > 0) {
             parsedSentences.push({
                 id: `s_${sIdx}_${Date.now()}`,
-                blockId: `block-0`, // 【强制所有句子归属首段】，等待手工切割
+                blockId: `block-0`, 
                 en: sentWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
                 zh: "",
                 chunks: chunks
@@ -344,7 +369,7 @@ export default function App() {
 
             if (e.message === "429") {
                 retryCount++;
-                setProcessMsg(`触发 70B 模型频率限制，正在憋气休眠 ${retryCount * 10} 秒后自动接力续传...`);
+                setProcessMsg(`触发额度超限保护，系统智能休眠 ${retryCount * 10} 秒后自动续传...`);
                 await delay(10000 * retryCount);
                 continue;
             }
@@ -359,7 +384,6 @@ export default function App() {
           }
         }
         if (i + chunkSize < parsedSentences.length) {
-            // 核心修复：放缓批次间隙至 4秒，极大降低触发 70B 模型限流的概率
             await delay(4000); 
         }
       }
@@ -762,6 +786,11 @@ export default function App() {
           mediaRecorder.start();
           audio.play().catch(() => alert("由于安全机制，音频导出需要您在此页面任意点击后再试。"));
           drawFrame();
+
+          // 核心修复：监听音频播放结束，停止录屏打包视频
+          audio.onended = () => {
+              mediaRecorder.stop();
+          };
 
       } catch (e) {
           console.error(e);
