@@ -1,9 +1,10 @@
 "use client";
+/* eslint-disable */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Upload, FileAudio, Play, Pause, ChevronLeft, 
-  CheckCircle, Loader2, Download, Edit3, Clock, 
+  Upload, FileAudio, Play, Pause, 
+  Loader2, Download,
   Mic, MessageSquare, ImagePlus, Scissors, ArrowUp, Eye, Image as ImageIcon, Video,
   ToggleLeft, ToggleRight
 } from 'lucide-react';
@@ -34,10 +35,40 @@ const CrossfadeImage = ({ src }) => {
   );
 };
 
-// ================= 智能断句与排版算法 (废除自动分段，增加孤儿词保护) =================
-const buildSubtitleStructures = (allWords) => {
+// ================= 核心：原稿段落严格映射算法 =================
+const getParagraphBreaks = (allWords, rawText) => {
+    const breaks = new Set();
+    if (!rawText) return breaks;
+
+    let textTracker = rawText.toLowerCase().replace(/[^a-z0-9\n]/g, '');
+    let currentSearchPos = 0;
+
+    for (let i = 0; i < allWords.length; i++) {
+        const w = allWords[i].word.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!w) continue;
+
+        const searchWindow = textTracker.substring(currentSearchPos, currentSearchPos + 100);
+        const localIdx = searchWindow.indexOf(w);
+
+        if (localIdx !== -1) {
+            const globalIdx = currentSearchPos + localIdx;
+            const textBetween = textTracker.substring(currentSearchPos, globalIdx);
+
+            if (textBetween.includes('\n')) {
+                if (i > 0) breaks.add(i - 1);
+            }
+            currentSearchPos = globalIdx + w.length;
+        }
+    }
+    return breaks;
+};
+
+// ================= 智能断句与排版算法 =================
+const buildSubtitleStructures = (allWords, rawText) => {
     const abbrs = ["u.s.", "u.k.", "mr.", "mrs.", "dr.", "ms.", "prof.", "inc.", "ltd.", "st.", "vs.", "i.e.", "e.g.", "a.m.", "p.m."];
     const isAbbr = (w) => abbrs.includes(w.toLowerCase()) || /^[a-z]\.$/i.test(w);
+
+    const pBreaks = getParagraphBreaks(allWords, rawText);
 
     let sentences = [];
     let curSentenceWords = [];
@@ -48,16 +79,19 @@ const buildSubtitleStructures = (allWords) => {
         const nextGap = i < allWords.length - 1 ? allWords[i+1].start - wObj.end : 0;
         
         const isStrongPunct = /[.?!。？！"”]['"]*$/.test(wText) && !isAbbr(wText);
+        const isParaBreak = pBreaks.has(i) || (nextGap > 1.5 && !rawText); 
         
-        const isLongGap = nextGap > 1.5 && curSentenceWords.length >= 3; 
-        
-        if (isStrongPunct || isLongGap || i === allWords.length - 1) {
-            sentences.push({ words: [...curSentenceWords] });
+        if (isStrongPunct || isParaBreak || i === allWords.length - 1) {
+            sentences.push({
+                words: [...curSentenceWords],
+                isBlockEnd: isParaBreak
+            });
             curSentenceWords = [];
         }
     });
 
     let parsedSentences = [];
+    let currentBlockIdx = 0;
     
     sentences.forEach((sentData, sIdx) => {
         let chunks = [];
@@ -94,11 +128,15 @@ const buildSubtitleStructures = (allWords) => {
         if (chunks.length > 0) {
             parsedSentences.push({
                 id: `s_${sIdx}_${Date.now()}`,
-                blockId: `block-0`, 
+                blockId: `block-${currentBlockIdx}`,
                 en: sentWords.map(w => w.word).join(" ").replace(/\s+([.,?!;])/g, "$1"),
                 zh: "",
                 chunks: chunks
             });
+        }
+        
+        if (sentData.isBlockEnd) {
+            currentBlockIdx++;
         }
     });
     
@@ -129,7 +167,7 @@ export default function App() {
   
   const [textBaseUrl, setTextBaseUrl] = useState('https://api.groq.com/openai/v1');
   const [textKey, setTextKey] = useState('');
-  const [textModel, setTextModel] = useState('llama-3.3-70b-versatile');
+  const [textModel, setTextModel] = useState('llama-3.1-8b-instant');
 
   const [isEnSourceRaw, setIsEnSourceRaw] = useState(false);
 
@@ -241,14 +279,15 @@ export default function App() {
           throw new Error("接口未返回时间轴数据。");
       }
       
-      setProcessMsg("2. 正在进行基础时间轴切分 (请后续手工切割新闻段落)...");
-      const parsedSentences = buildSubtitleStructures(allWords);
+      setProcessMsg("2. 启动原稿严格对齐引擎划分新闻段落...");
+      const parsedSentences = buildSubtitleStructures(allWords, formData.rawText);
 
-      const initialBlocks = [{
-          id: 'block-0',
-          title: `新闻首段 (请在下方手工向下切割新段落)`,
+      const uniqueBlocks = [...new Set(parsedSentences.map(s => s.blockId))];
+      const initialBlocks = uniqueBlocks.map((bId, idx) => ({
+          id: bId,
+          title: `新闻内容段落 ${idx + 1}`,
           image: ""
-      }];
+      }));
 
       const chatUrl = `${textBaseUrl.trim().replace(/\/+$/, '')}/chat/completions`;
       let extractedDateStr = "";
@@ -256,7 +295,7 @@ export default function App() {
       const totalChunks = Math.ceil(parsedSentences.length / chunkSize);
 
       for (let i = 0; i < parsedSentences.length; i += chunkSize) {
-        setProcessMsg(`3. Llama-3.3-70b 模型双语同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
+        setProcessMsg(`3. Llama 模型双语意译同步中 (第 ${Math.floor(i/chunkSize)+1}/${totalChunks} 批)...`);
         const chunk = parsedSentences.slice(i, i + chunkSize);
         const isFirstChunk = i === 0;
         
@@ -307,10 +346,8 @@ export default function App() {
             const llmResult = await llmRes.json();
             let content = llmResult.choices[0].message.content;
             
-            // 核心修复：彻底移除了那句自毁 JSON 的 replace 代码
-            
             const jsonMatch = content.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) throw new Error(`未找到有效的 JSON 结构`);
+            if (!jsonMatch) throw new Error(`大模型未返回有效的 JSON 结构。原始片段: ${content.substring(0,50)}`);
             
             let parsed;
             try {
@@ -709,3 +746,382 @@ export default function App() {
                   let maxEnBoxHeight = 0;
                   activeSentence.chunks.forEach(c => {
                       let simY = enBoxY + 70;
+                      const tokens = c.en.match(/[\w\.\,\!\?\-\']+|\s+/g) || c.en.split('');
+                      let simLine = '';
+                      for (let n = 0; n < tokens.length; n++) {
+                          const testLine = simLine + tokens[n];
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0 && tokens[n].trim() !== '') {
+                              simLine = tokens[n]; simY += 65;
+                          } else { simLine = testLine; }
+                      }
+                      if ((simY - enBoxY) + 50 > maxEnBoxHeight) maxEnBoxHeight = (simY - enBoxY) + 50;
+                  });
+
+                  ctx.fillStyle = 'rgba(30, 58, 138, 0.6)'; ctx.strokeStyle = 'rgba(59, 130, 246, 0.3)'; ctx.lineWidth = 3;
+                  drawRoundRect(ctx, boxX, enBoxY, boxWidth, maxEnBoxHeight, 24); ctx.fill(); ctx.stroke();
+                  ctx.fillStyle = '#ffffff'; ctx.textAlign = 'left';
+                  wrapTextCanvas(ctx, displayEn, textX, enBoxY + 70, textMaxWidth, 65);
+
+                  const zhBoxY = enBoxY + maxEnBoxHeight + 40;
+                  ctx.font = 'bold 42px sans-serif';
+                  let maxZhBoxHeight = 0;
+                  const zhChunksList = splitChineseText(activeSentence.zh);
+                  zhChunksList.forEach(chunk => {
+                      let zhSimY = zhBoxY + 65;
+                      const zhTokens = chunk.split('');
+                      let zhSimLine = '';
+                      for (let n = 0; n < zhTokens.length; n++) {
+                          const testLine = zhSimLine + zhTokens[n];
+                          if (ctx.measureText(testLine).width > textMaxWidth && n > 0) {
+                              zhSimLine = zhTokens[n]; zhSimY += 60;
+                          } else { zhSimLine = testLine; }
+                      }
+                      if ((zhSimY - zhBoxY) + 45 > maxZhBoxHeight) maxZhBoxHeight = (zhSimY - zhBoxY) + 45;
+                  });
+
+                  let activeZh = activeSentence.zh;
+                  if (zhChunksList.length > 0) {
+                      const totalDur = activeSentence.chunks[activeSentence.chunks.length-1].end - activeSentence.chunks[0].start;
+                      let elapsed = time - activeSentence.chunks[0].start;
+                      const idx = Math.min(Math.floor((elapsed / totalDur) * zhChunksList.length), zhChunksList.length - 1);
+                      activeZh = zhChunksList[Math.max(0, idx)];
+                  }
+
+                  ctx.fillStyle = '#4285F4'; ctx.strokeStyle = '#4285F4';
+                  drawRoundRect(ctx, boxX, zhBoxY, boxWidth, maxZhBoxHeight, 24); ctx.fill(); ctx.stroke();
+                  ctx.fillStyle = '#ffffff';
+                  wrapTextCanvas(ctx, activeZh, textX, zhBoxY + 65, textMaxWidth, 60);
+              }
+
+              animationId = requestAnimationFrame(drawFrame);
+          };
+
+          mediaRecorder.start();
+          audio.play().catch(() => alert("由于安全机制，音频导出需要您在此页面任意点击后再试。"));
+          drawFrame();
+
+      } catch (e) {
+          console.error(e);
+          alert(`视频导出初始化失败: ${e.message}`);
+          setIsExportingVideo(false); cancelAnimationFrame(animationId);
+      }
+  };
+
+  const renderPhoneScreen = () => {
+    if (isProcessing) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-white p-6"><Loader2 size={40} className="animate-spin text-[#4285F4] mb-4" /><p className="text-sm">{processMsg}</p></div>;
+    if (sentences.length === 0) return <div className="flex-1 flex flex-col items-center justify-center bg-black text-gray-500 p-6 text-center"><ImageIcon size={48} className="opacity-50 mb-4" /><p className="text-sm">上传剧本，开启全屏工作流</p></div>;
+
+    let activeSentence = null;
+    let activeChunk = null;
+    for (let i = 0; i < sentences.length; i++) {
+        const sent = sentences[i];
+        if (sent.chunks.length === 0) continue;
+        if (currentTime >= sent.chunks[0].start && currentTime <= sent.chunks[sent.chunks.length - 1].end) {
+            activeSentence = sent;
+            activeChunk = sent.chunks.find(c => currentTime >= c.start && currentTime <= c.end);
+            break;
+        }
+    }
+
+    let targetImage = ""; 
+    const referenceSentence = activeSentence || sentences.slice().reverse().find(s => s.chunks[0]?.start <= currentTime) || sentences[0];
+    if (referenceSentence) {
+        const blockIdx = blocks.findIndex(b => b.id === referenceSentence.blockId);
+        for (let i = blockIdx; i >= 0; i--) {
+            if (blocks[i] && blocks[i].image) { targetImage = blocks[i].image; break; }
+        }
+    }
+
+    let longestChunkEn = "";
+    if (activeSentence) {
+        longestChunkEn = activeSentence.chunks.reduce((p, c) => c.en.length > p.en.length ? c : p, { en: "" }).en;
+    }
+
+    const zhChunksTextList = activeSentence ? splitChineseText(activeSentence.zh) : [];
+    let activeZh = activeSentence ? activeSentence.zh : "";
+    if (activeSentence && zhChunksTextList.length > 0) {
+        const totalDur = activeSentence.chunks[activeSentence.chunks.length-1].end - activeSentence.chunks[0].start;
+        let elapsed = currentTime - activeSentence.chunks[0].start;
+        const idx = Math.min(Math.floor((elapsed / totalDur) * zhChunksTextList.length), zhChunksTextList.length - 1);
+        activeZh = zhChunksTextList[Math.max(0, idx)];
+    }
+
+    return (
+      <div className="relative flex flex-col h-full w-full bg-black overflow-hidden cursor-pointer" onClick={togglePlay}>
+        <div className="flex-none pt-12 pb-2 flex flex-col items-center justify-center text-white px-6 text-center z-10 shrink-0">
+          <h1 className="text-[28px] font-extrabold tracking-tight mb-0.5 font-sans leading-none">KidNuz</h1>
+          <p className="text-[11px] font-medium opacity-95 text-yellow-400 leading-none">{newsDate || getFormattedDate()}</p>
+        </div>
+
+        <div className="w-full shrink-0 relative" style={{ aspectRatio: '16/9' }}>
+           {targetImage ? <CrossfadeImage src={targetImage} /> : <div className="w-full h-full bg-gray-900 flex items-center justify-center"><ImageIcon size={32} className="text-gray-600 opacity-50" /></div>}
+           {!isPlaying && <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none"><div className="bg-black/50 rounded-full p-4 backdrop-blur-md shadow-xl"><Play size={32} fill="currentColor" className="text-white ml-1" /></div></div>}
+        </div>
+        
+        <div className="flex-1 w-full px-4 pt-4 overflow-hidden flex flex-col justify-start">
+            {activeSentence && (
+              <>
+                <div className="w-full bg-blue-900/60 backdrop-blur-md rounded-xl border border-blue-500/30 grid">
+                  <div className="col-start-1 row-start-1 p-3.5 opacity-0 pointer-events-none select-none">
+                    <p className="font-semibold text-[17px] leading-[1.4] text-left">{longestChunkEn}</p>
+                  </div>
+                  {activeSentence.chunks.map((chunk, cIdx) => {
+                    const displayEn = activeChunk ? activeChunk.en : activeSentence.chunks[activeSentence.chunks.length - 1].en;
+                    return (
+                      <div key={chunk.id} className={`col-start-1 row-start-1 p-3.5 transition-opacity duration-200 ${displayEn === chunk.en ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                        <p className="text-white font-semibold text-[17px] leading-[1.4] text-left">{chunk.en}</p>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="w-full bg-[#4285F4] backdrop-blur-md rounded-xl shadow-lg grid mt-3">
+                  {zhChunksTextList.length > 0 ? zhChunksTextList.map((zhChunk, zIdx) => (
+                    <div key={zIdx} className={`col-start-1 row-start-1 p-3.5 transition-opacity duration-200 ${activeZh === zhChunk ? 'opacity-100 z-10' : 'opacity-0 pointer-events-none'}`}>
+                      <p className="text-white font-bold text-[15px] leading-relaxed text-left drop-shadow-sm">{zhChunk}</p>
+                    </div>
+                  )) : (
+                    <div className="col-start-1 row-start-1 p-3.5 opacity-100 z-10">
+                      <p className="text-white font-bold text-[15px] leading-relaxed text-left drop-shadow-sm">{activeSentence.zh}</p>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+        </div>
+
+        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-gray-800 z-50 group" onClick={e => e.stopPropagation()}>
+          <div className="h-full bg-yellow-400 ease-linear pointer-events-none" style={{ width: `${(currentTime / (formData.audioDuration || 1)) * 100}%` }}></div>
+          <input type="range" min="0" max={formData.audioDuration || 1} step="0.01" value={currentTime} onChange={handleSeek} className="absolute inset-0 w-full h-4 -top-1 opacity-0 cursor-pointer z-10" />
+        </div>
+      </div>
+    );
+  };
+
+  const renderWorkspace = () => {
+    if (sentences.length === 0) {
+      return (
+        <div className="flex-1 overflow-y-auto bg-gray-50 flex flex-col">
+          <div className="p-8 max-w-3xl mx-auto w-full space-y-6 flex-1">
+            <div className="border-b border-gray-200 pb-4">
+              <h1 className="text-2xl font-bold text-gray-800">构建新闻项目</h1>
+              <p className="text-sm text-gray-500 mt-2">已全面升级至 Llama-3.1-8B 高速引擎，消除双轨断连风险。</p>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
+                <label className="text-xs font-bold flex items-center text-blue-600"><Mic size={14} className="mr-1" />Whisper 语音节点 (Groq)</label>
+                <input type="text" value={audioBaseUrl} onChange={e => { setAudioBaseUrl(e.target.value); localStorage.setItem('wx_audio_url_v_groq4', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <div className="flex space-x-2">
+                  <input type="password" placeholder="API Key" value={audioKey} onChange={e => { setAudioKey(e.target.value); localStorage.setItem('wx_audio_key_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={audioModel} onChange={e => { setAudioModel(e.target.value); localStorage.setItem('wx_audio_model_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                </div>
+              </div>
+
+              <div className="bg-white p-4 rounded-xl border shadow-sm space-y-2">
+                <label className="text-xs font-bold flex items-center text-[#4285F4]"><MessageSquare size={14} className="mr-1" />LLM 翻译与对齐节点 (Groq)</label>
+                <input type="text" value={textBaseUrl} onChange={e => { setTextBaseUrl(e.target.value); localStorage.setItem('wx_text_url_v_groq4', e.target.value); }} className="w-full border rounded p-2 text-xs outline-none focus:ring-1 focus:ring-blue-500" />
+                <div className="flex space-x-2">
+                  <input type="password" placeholder="API Key" value={textKey} onChange={e => { setTextKey(e.target.value); localStorage.setItem('wx_text_key_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                  <input type="text" placeholder="Model" value={textModel} onChange={e => { setTextModel(e.target.value); localStorage.setItem('wx_text_model_v_groq4', e.target.value); }} className="w-1/2 border rounded p-2 text-xs outline-none" />
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white p-5 rounded-xl border shadow-sm space-y-4">
+              <div>
+                <label className="text-sm font-bold block mb-2">1. 挂载主播报音频</label>
+                <div className="border border-dashed border-gray-300 rounded-lg bg-gray-50 hover:bg-gray-100 p-6 flex flex-col items-center relative overflow-hidden transition-colors">
+                  {formData.audioName ? 
+                    <div className="text-center"><FileAudio size={32} className="text-[#4285F4] mx-auto mb-2" /><p className="font-medium text-xs text-gray-700">{formData.audioName}</p></div> : 
+                    <div className="text-center text-gray-500"><Upload size={32} className="mx-auto mb-2 text-gray-400" /><p className="text-xs">点击此处加载音频文件</p></div>
+                  }
+                  <input type="file" accept="audio/*" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onChange={(e) => {
+                    const file = e.target.files[0];
+                    if (file) { setFormData(prev => ({...prev, audioFile: file, audioName: file.name, audioUrl: URL.createObjectURL(file)})); }
+                  }} />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-end mb-2">
+                    <label className="text-sm font-bold block">2. 粘贴原文字幕结构段</label>
+                    <button 
+                        onClick={() => setIsEnSourceRaw(!isEnSourceRaw)}
+                        className={`flex items-center text-[11px] font-semibold px-2 py-1 rounded transition-colors ${isEnSourceRaw ? 'bg-blue-100 text-blue-700 border border-blue-200' : 'bg-gray-100 text-gray-500 border border-gray-200'}`}
+                    >
+                        {isEnSourceRaw ? <ToggleRight size={14} className="mr-1" /> : <ToggleLeft size={14} className="mr-1" />}
+                        {isEnSourceRaw ? '英文字幕强制以原文为准 (替换 AI)' : '英文字幕以 AI 语音识别为准'}
+                    </button>
+                </div>
+                <textarea className="w-full h-24 p-3 text-xs border border-gray-300 rounded-lg resize-none outline-none focus:ring-1 focus:ring-blue-500 bg-gray-50" value={formData.rawText} onChange={e => setFormData({...formData, rawText: e.target.value})} placeholder="粘贴原文供大模型校对错别字..."></textarea>
+              </div>
+            </div>
+            
+            <button onClick={startProcessing} disabled={isProcessing} className="w-full bg-[#4285F4] text-white rounded-xl py-3.5 font-bold text-base hover:bg-blue-600 transition-all shadow flex items-center justify-center disabled:opacity-50">
+              {isProcessing ? <Loader2 className="animate-spin mr-2" size={18} /> : <Play className="mr-2" size={18} />}
+              {isProcessing ? "全局引擎协同运转中..." : "启动无损切片解析"}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex-1 flex flex-col bg-gray-50 relative overflow-hidden">
+        <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center space-x-4 shrink-0 shadow-sm z-10">
+           <button onClick={togglePlay} className="w-10 h-10 rounded-full bg-[#4285F4] flex justify-center items-center hover:bg-blue-600 text-white shrink-0 shadow">
+             {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-1" />}
+           </button>
+           <div className="flex-1 space-y-1">
+             <input type="range" min="0" max={formData.audioDuration || 1} step="0.01" value={currentTime} onChange={handleSeek} className="w-full h-1.5 bg-gray-200 rounded-full appearance-none cursor-pointer accent-[#4285F4]" />
+             <div className="flex justify-between text-[10px] text-gray-500 font-mono font-medium">
+               <span>{formatTime(currentTime)}</span><span>{formData.audioDuration ? formatTime(formData.audioDuration) : '00:00.0'}</span>
+             </div>
+           </div>
+           
+           <div className="flex items-center space-x-2">
+               <button onClick={handleExportSRT} className="bg-gray-800 hover:bg-gray-900 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center shadow-sm">
+                <Download size={14} className="mr-1.5" /> SRT
+              </button>
+              <button onClick={startVideoExport} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center shadow-sm transition-colors">
+                <Video size={14} className="mr-1.5" /> 导出视频
+              </button>
+           </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
+          {blocks.map((block, bIdx) => {
+            const blockSentences = sentences.filter(s => s.blockId === block.id);
+            if (blockSentences.length === 0) return null; 
+            
+            return (
+              <div key={block.id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col xl:flex-row">
+                 <div className="w-full xl:w-[280px] bg-gray-50 border-b xl:border-b-0 xl:border-r border-gray-200 p-4 flex flex-col shrink-0">
+                    <div className="flex items-center justify-between mb-3">
+                       <input type="text" value={block.title} onChange={(e) => handleRenameBlock(block.id, e.target.value)} className="font-bold text-sm text-gray-800 bg-transparent border-b border-transparent hover:border-gray-300 focus:border-blue-500 outline-none w-2/3 px-1" />
+                       {bIdx > 0 && <button onClick={() => handleMergeUp(block.id)} title="与上合并" className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded"><ArrowUp size={14} /></button>}
+                    </div>
+                    <div className="w-full aspect-video bg-black rounded overflow-hidden relative shadow-inner border border-gray-200 mb-3 flex items-center justify-center group">
+                       {block.image ? <img src={block.image} className="w-full h-full object-cover" alt="Block Cover" /> : <div className="text-gray-500 flex flex-col items-center"><ImageIcon size={24} className="mb-1 opacity-50" /><span className="text-[10px]">画面媒体位</span></div>}
+                       <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none"><span className="text-white font-medium text-xs drop-shadow">点击重置画面</span></div>
+                    </div>
+                    <label className="w-full flex items-center justify-center bg-white border border-gray-300 text-gray-700 hover:text-blue-600 hover:border-blue-400 py-1.5 rounded-lg cursor-pointer text-xs font-semibold shadow-sm transition-colors">
+                       <ImagePlus size={14} className="mr-1.5" /> 上传/替换场景图
+                       <input type="file" accept="image/*" className="hidden" onChange={(e)=>handleReplaceBlockImage(block.id, e.target.files[0])} />
+                    </label>
+                 </div>
+                 
+                 <div className="flex-1 p-4 bg-white max-h-[450px] overflow-y-auto space-y-3 relative">
+                    {blockSentences.map((sent, sIdx) => {
+                       const sentIdx = sentences.findIndex(s => s.id === sent.id);
+                       const isLastOverall = sentIdx === sentences.length - 1;
+                       const isSentenceActive = sent.chunks.some(c => currentTime >= c.start && currentTime <= c.end);
+
+                       return (
+                          <div key={sent.id}>
+                            <div className={`rounded-lg border transition-all duration-200 ${isSentenceActive ? 'border-sky-400 bg-sky-50/20 shadow-md ring-1 ring-sky-200' : 'border-gray-200 bg-white hover:border-gray-300'}`}>
+                              
+                              <div className={`px-3 py-2 border-b flex flex-col rounded-t-lg ${isSentenceActive ? 'bg-sky-100/40 border-sky-200' : 'bg-gray-50 border-gray-100'}`}>
+                                <div className="flex justify-between items-center mb-1">
+                                    <span className="text-[10px] font-bold text-[#4285F4]">中文统译轨道 (对应下方全组切片)</span>
+                                    {sentIdx > 0 && sentences[sentIdx - 1].blockId === sent.blockId && (
+                                        <button onClick={() => handleMergeSentenceUp(sentIdx)} className="text-[10px] text-blue-600 hover:text-white hover:bg-blue-500 flex items-center bg-blue-100 px-2 py-0.5 rounded transition-colors">
+                                            <ArrowUp size={10} className="mr-1"/> 与上句缝合 (中英同步)
+                                        </button>
+                                    )}
+                                </div>
+                                <textarea value={sent.zh} onChange={(e) => { const n=[...sentences]; n[sentIdx].zh=e.target.value; setSentences(n); }} className="w-full text-xs font-medium text-gray-800 bg-transparent outline-none resize-none leading-relaxed min-h-[30px]" placeholder="等待引擎接入中文意译..." />
+                              </div>
+
+                              <div className="p-2 space-y-1.5">
+                                <div className="flex items-center justify-between mb-1">
+                                    <div className="text-[9px] font-bold text-gray-400">英文强制切分轴</div>
+                                    <div className="text-[9px] text-yellow-600 font-medium px-1.5 py-0.5 bg-yellow-50 rounded border border-yellow-100">
+                                        💡 极速微调：框内按 Enter 拆分整句，行首按 Backspace 向上合并
+                                    </div>
+                                </div>
+                                {sent.chunks.map((chunk, cIdx) => {
+                                    const isChunkActive = currentTime >= chunk.start && currentTime <= chunk.end;
+                                    return (
+                                        <div key={chunk.id} className={`flex items-start space-x-2 rounded p-1.5 border transition-all ${isChunkActive ? 'border-blue-400 bg-blue-50 ring-1 ring-blue-200' : 'border-gray-100 bg-gray-50'}`}>
+                                            <div className="flex flex-col space-y-1 w-12 shrink-0">
+                                                <input type="number" step="0.1" value={chunk.start.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].start=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[9px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                                <input type="number" step="0.1" value={chunk.end.toFixed(1)} onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].end=parseFloat(e.target.value)||0; setSentences(n); }} className="w-full text-[9px] font-mono text-center bg-white border border-gray-200 rounded focus:border-blue-400 outline-none p-0.5" />
+                                            </div>
+                                            <textarea 
+                                                value={chunk.en} 
+                                                onKeyDown={(e) => handleChunkKeyDown(e, sentIdx, cIdx)}
+                                                onChange={(e) => { const n=[...sentences]; n[sentIdx].chunks[cIdx].en=e.target.value; n[sentIdx].en = n[sentIdx].chunks.map(c=>c.en).join(" "); setSentences(n); }} 
+                                                className="flex-1 text-[11px] font-medium text-gray-800 bg-transparent outline-none resize-none h-[30px]" 
+                                            />
+                                        </div>
+                                    )
+                                })}
+                              </div>
+
+                            </div>
+
+                            {!isLastOverall && (
+                              <div className="flex justify-center my-1 relative group py-1">
+                                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-dashed border-gray-200 group-hover:border-blue-300 transition-colors"></div></div>
+                                <button onClick={() => handleSplitAfter(sent.id, block.id)} className="relative bg-white border border-gray-200 text-gray-500 group-hover:text-[#4285F4] group-hover:border-blue-400 group-hover:shadow-sm text-[10px] px-2 py-0.5 rounded-full font-medium transition-all flex items-center opacity-0 group-hover:opacity-100">
+                                  <Scissors size={10} className="mr-1" /> 在此向下拆出新段落 (News Block)
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                       )
+                    })}
+                 </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex h-screen w-screen bg-gray-900 text-gray-800 font-sans overflow-hidden">
+      <audio 
+        ref={audioRef} 
+        src={formData.audioUrl} 
+        onTimeUpdate={handleTimeUpdate} 
+        onLoadedMetadata={(e) => setFormData(prev => ({...prev, audioDuration: e.target.duration}))}
+        onEnded={() => setIsPlaying(false)}
+        onPause={() => setIsPlaying(false)}
+        onPlay={() => setIsPlaying(true)}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none', display: 'block' }}
+      />
+      
+      <canvas ref={exportCanvasRef} width={1080} height={1920} className="hidden pointer-events-none" />
+
+      {isExportingVideo && (
+        <div className="absolute inset-0 z-50 bg-black/80 flex flex-col items-center justify-center text-white backdrop-blur-sm">
+            <Loader2 size={64} className="animate-spin text-green-500 mb-6" />
+            <h2 className="text-3xl font-bold mb-3 tracking-wide">正在实时渲染并导出视频...</h2>
+            <p className="text-gray-300 mb-8 font-medium">请勿关闭或切换页面标签，此过程需要与音频实际播放等长的时间</p>
+            <div className="w-96 h-3 bg-gray-800 rounded-full overflow-hidden shadow-inner">
+                <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${exportProgress * 100}%` }}></div>
+            </div>
+            <p className="mt-4 text-xl font-mono text-green-400">{Math.round(exportProgress * 100)}%</p>
+        </div>
+      )}
+
+      <div className="w-[450px] h-full p-8 flex flex-col items-center justify-center shrink-0 border-r border-white/10 bg-black/40 relative">
+         <div className="absolute top-6 left-8 text-white/50 text-xs font-bold tracking-widest flex items-center">
+            <Eye size={14} className="mr-2" /> LIVE PREVIEW (16:9 顶吸版)
+         </div>
+         <div className="w-[375px] h-[812px] bg-black rounded-[3rem] border-[14px] border-gray-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] relative overflow-hidden flex flex-col ring-1 ring-white/10">
+            <div className="absolute top-0 inset-x-0 h-6 bg-gray-800 rounded-b-2xl w-1/2 mx-auto z-50"></div>
+            {renderPhoneScreen()}
+         </div>
+      </div>
+
+      <div className="flex-1 flex flex-col h-full bg-white relative overflow-hidden">
+         {renderWorkspace()}
+      </div>
+    </div>
+  );
+}
